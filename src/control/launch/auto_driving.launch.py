@@ -16,10 +16,10 @@ def get_vehicle_config_path():
 
 def get_default_model_path():
     for base_path in Path(__file__).resolve().parents:
-        candidate = base_path / 'src' / 'inference' / 'model' / 'test19.h5'
+        candidate = base_path / 'models' / 'best.onnx'
         if candidate.exists():
             return str(candidate)
-    return '/home/topst/D-Racer/src/inference/model/test19.h5'
+    return '/home/topst/D-Racer-Kit/models/best.onnx'
 
 
 def generate_launch_description():
@@ -31,7 +31,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'model_path',
             default_value=default_model_path,
-            description='Path to the H5 model file used by inference_node',
+            description='Path to the YOLO26n ONNX model file used by inference_node',
         ),
         Node(
             package='camera',
