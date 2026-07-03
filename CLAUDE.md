@@ -127,7 +127,7 @@ ros2 launch <bringup_pkg> auto_driving.launch.py
 - ~~NMS-free 출력 순서 Netron 확인 필요~~ → **확인 완료**: 출력 `(1,300,6)`, 6값 = `[x1,y1,x2,y2,score,class_id]`, score 내림차순·NMS-free. 앵커 디코딩·NMS 재적용 금지. (`yolo_onnx.py`에 반영)
 - ~~런타임 선택~~ → **확정**: ONNX Runtime(CPUExecutionProvider) 채택·설치 완료(10.2).
 - **검증 지표 낙관 가능성** — 데이터셋 내부 mAP50이 0.99로 매우 높으나 연속 프레임 train/val 누수 가능성이 있어 **실트랙 성능은 더 낮을 수 있음.** 실환경 프레임 재검증 + 9.5(시간적 필터링, 이미 `inference_node`에 구현) 적용.
-- **좌/우 표지판 혼동 주의** — 검증에서 `left_sign` recall이 0.866으로 유일하게 낮고 `right_sign` precision이 0.942였습니다. 좌↔우 오분류가 있다면 B.3 기준 **방향 오주행 → 미션 실패**로 직결됩니다. `confusion_matrix.png`로 혼동 여부를 확인하고, 필요 시 좌회전 표지판 데이터를 보강하세요.
+- **좌/우 표지판 혼동 주의 (근본 원인 규명됨)** — 검증에서 `left_sign` recall이 0.866으로 유일하게 낮고 `right_sign` precision이 0.942였습니다. 좌↔우 오분류가 있다면 B.3 기준 **방향 오주행 → 미션 실패**로 직결됩니다. **원인 확인: 학습 시 `fliplr=0.5`(좌우 반전 augmentation)로 인해 좌회전 표지판이 우회전 모양으로 뒤집혀도 라벨이 `left_sign`으로 남아 좌↔우가 구조적으로 섞임.** 데이터 보강만으로는 해결 안 되며 **`fliplr=0.0` 재학습이 근본 해결**(상세·재배포 절차 10.2). 재학습 전까지는 `inference_node`의 margin 게이팅(`sign_margin`/`sign_conf`)이 오주행을 완화(10.2). `confusion_matrix.png`로 혼동 정도를 확인하세요.
 
 ### 8.2 토픽명 슬래시 불일치 가능성
 - 노드 **파라미터 기본값**: `battery_status`, `joystick` (슬래시 **없음** → 상대 네임스페이스)
@@ -218,6 +218,9 @@ ros2 launch <bringup_pkg> auto_driving.launch.py
 - **분할**: train 80% / val 20% 기준. ⚠️ 연속 프레임 무작위 분할 시 누수 위험 → **클립·시간 구간 단위 분리 권장.** val에 4클래스가 각각 충분히 포함되는지 확인.
 - **학습 환경/설정**: Google Colab GPU(T4), ultralytics 8.4.84, `yolo26n.pt` 파인튜닝, `imgsz=640`, `epochs=100`, `batch=16`.
   - **`hsv_h=0.0`** — 신호등 초록/빨강은 색 기반 구분이므로 hue augmentation을 꺼서 두 클래스 혼동 방지.
+  - **⚠️ `fliplr=0.0` 필수 — 방향 표지판 좌/우 혼동의 근본 원인.** ultralytics 기본값은 `fliplr=0.5`(학습 이미지 절반을 좌우 반전). 좌회전 표지판(←)을 좌우 반전하면 화살표가 우측(→)을 가리키는데 라벨은 `left_sign`으로 남아, 모델에게 "우측 화살표의 절반은 left_sign"이라고 가르치게 됨 → 좌↔우가 구조적으로 섞임. **현 배포 모델(`best.onnx`)은 `fliplr=0.5`로 학습되어 실제로 left→right 오분류가 관찰됨**(8.1의 `left_sign` recall 0.866과 일치). 이 상태에서는 좌회전 데이터를 늘려도 fliplr이 켜져 있으면 혼동이 안 사라지므로, **재학습 시 반드시 `fliplr=0.0`으로 설정**할 것. `flipud`(기본 0.0)·`mosaic`(반전 아님)은 무관, `degrees/shear/perspective`도 기본 0으로 무관 — 바꿀 값은 `fliplr` 하나.
+  - **재학습→재배포 절차**: 위 설정으로 재학습 후 export는 **기존과 동일하게**(YOLO26 end2end/NMS-free, opset 12, 출력 `(1,300,6)`) 뽑아야 `inference/yolo_onnx.py`의 `_parse_output`이 그대로 동작함. export 방식을 바꾸면 파싱이 깨짐. 산출 `best.onnx`를 보드 `/home/topst/D-Racer-Kit/models/best.onnx`로 덮어쓰면 노드가 자동 로드.
+  - **런타임 완화책(재학습 전/후 병행)**: `inference_node`에 좌/우 margin 게이팅 구현됨 — 한 프레임에 좌/우가 함께 잡히면 점수 차가 `sign_margin`(기본 0.15) 이상이고 우세 점수가 `sign_conf`(기본 0.35) 이상일 때만 분기 인정, 근소차는 애매로 보고 대기(`resolve_sign`/`update_temporal_filter`). 오주행은 막지만 모델 혼동 자체를 고치진 못하므로 **근본 해결은 `fliplr=0.0` 재학습**.
 - **모델 요약**: YOLO26n(fused) 122 layers, 약 2.38M params, 5.2 GFLOPs.
 - **검증 지표 (데이터셋 내부 val, 344장 / 345 instances):**
 
