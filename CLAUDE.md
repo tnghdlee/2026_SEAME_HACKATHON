@@ -6,13 +6,13 @@
 
 본문(0~11)은 작업 가이드이고, **패키지별 상세 레퍼런스**(빌드 타입·실행 노드·의존성·data_files·메시지 필드·토픽 발행/구독 표·데이터 흐름도)는 **부록 E**에 정리되어 있습니다. 특정 패키지·토픽·메시지의 정확한 정의가 필요할 때 부록 E를 참조하세요.
 
-> **최근 진행 사항 (Vision):** YOLO26n 학습 완료 + **`inference` 패키지 신설·빌드·온디바이스 검증까지 완료**되어, 이슈 8.1의 *모델 형식 결정·추론 노드 부재*는 해소되었습니다(YOLO26n/ONNX 통일, `test19.h5` 폐기). `/camera/image/compressed → YOLO26n(ONNX) → /control` 경로가 실제로 동작합니다. 다만 **추론 결과를 실제 주행으로 잇는 정책(차선 추종 조향·미션 FSM·ArUco)은 아직 미완**이라, 자율주행은 "인식은 되나 안전상 정지(throttle=0) 상태"입니다. 상세는 8.1 및 10.2를 참조하세요.
+> **최근 진행 사항 (Vision):** YOLO26n 학습 완료 + **`inference` 패키지 신설·빌드·온디바이스 검증까지 완료**되어, 이슈 8.1의 *모델 형식 결정·추론 노드 부재*는 해소되었습니다(YOLO26n/ONNX 통일, `test19.h5` 폐기). `/camera/image/compressed → YOLO26n(ONNX) → /control` 경로가 실제로 동작합니다. **주행 정책도 상당 부분 구현**되었습니다: 차선 추종 조향(PD+슬루+차선로스트 폴백), 출발 초록불 게이팅(B.1), 좌/우 갈림길 분기(B.3, `turn_intent` 래치+margin 게이팅), 도착 빨간불 하드 정지(B.6), 초록불 확정 후 `cruise_throttle`(0.13) 순항까지 `inference_node`에 들어갔습니다. **남은 미완은 ArUco 동적 장애물(B.4)·회전 교차로(B.5)·커브 감속(B.2, param만 있고 코드 비활성)**, 그리고 **차선 신호 배선 갭**(`opencv_node`가 `/lane/offset`을 발행하지만 `auto_driving.launch.py`에 포함돼 있지 않아, 현재 launch 그대로면 조향이 중립 유지)입니다. 상세는 8.1 및 10.2를 참조하세요.
 
 ---
 
 ## 0. 가장 먼저 알아야 할 것 (Quick Start for Claude Code)
 
-1. **자율주행 "인식"은 되지만 "주행"은 아직입니다.** `inference` 패키지가 신설·빌드·검증되어 `/control` 발행자는 존재합니다(YOLO26n/ONNX). 단 현재 정책은 안전 기본값이라 조향=중립·throttle=0으로 차가 움직이지 않습니다. 남은 핵심 작업은 **차선 추종 조향 + 미션 FSM(초록불 게이팅/갈림길 분기/도착 정지) + ArUco 정지**를 붙여 실제 주행을 완성하는 것입니다. → 8.1 / 10.2 참조.
+1. **자율주행 "인식"에 더해 "주행 정책"도 대부분 구현됐습니다.** `inference` 패키지가 `/control` 발행자로 동작하며(YOLO26n/ONNX), 차선 추종 조향·출발 초록불 게이팅·좌/우 갈림길 분기·도착 빨간불 정지·순항 throttle(0.13)이 들어가 있습니다. 남은 핵심 작업은 **① 차선 신호 배선**(`opencv_node`를 `auto_driving.launch.py`에 추가하거나 별도 실행 — 없으면 `/lane/offset` 미발행으로 조향이 중립 유지)**, ② 커브 감속 재활성(B.2), ③ ArUco 동적 장애물 정지/재출발(B.4), ④ 회전 교차로(B.5)**입니다. → 8.1 / 10.2 참조.
 2. **빌드 순서가 정해져 있습니다.** 메시지 패키지가 단방향 의존을 가지므로 인터페이스 계층을 먼저 빌드해야 합니다. → 6번 참조.
 3. **토픽명 슬래시(`/`) 불일치 가능성**이 있습니다. 파라미터 기본값과 `vehicle_config.yaml`이 다릅니다. 토픽 관련 작업 시 반드시 확인하세요. → 8.2 참조.
 4. **완주 안정성 > 속도.** Lab-Time 페널티(대부분 +30s)가 순주행 시간보다 큰 경우가 많습니다. → 9번 설계 원칙 참조.
@@ -80,7 +80,7 @@ camera ──► opencv ──┬──► monitor   (영상 전처리 결과 �
 ```
 
 - 카메라 원본 → `opencv` 전처리 → **monitor(시각화)** 와 **자율주행 추론 경로**가 영상 데이터를 **분기(fan-out) 소비**합니다.
-- 자율주행 추론 경로의 결과가 `control_node`로 들어가 액추에이션됩니다. **단, 현재 추론 노드가 누락되어 이 경로가 끊겨 있습니다(8.1).**
+- 자율주행 추론 경로(`inference_node`)의 결과가 `/control`로 발행되어 `control_node`로 들어가 액추에이션됩니다. **추론 노드는 구현·검증 완료입니다(8.1/10.2).** 단 차선 추종 조향은 `opencv_node`의 `/lane/offset` 신호가 필요한데, 이 발행자가 `auto_driving.launch.py`에 아직 포함돼 있지 않습니다(8.1 남은 작업 ①).
 
 > 노드별 정확한 토픽명·메시지 타입과 자율/수동 모드별 전체 흐름도는 **부록 E.4~E.5**를 참조하세요.
 
@@ -98,8 +98,9 @@ source install/setup.bash
 ```
 
 ```bash
-# 자율주행 모드 (※ 현재 inference 패키지 누락으로 /control 발행자 없음 → 8.1 해결 후 정상 동작)
-ros2 launch <bringup_pkg> auto_driving.launch.py
+# 자율주행 모드 (inference_node가 /control 발행 — 동작함. 단 차선 추종을 쓰려면
+# opencv_node를 함께 실행해 /lane/offset을 발행해야 함, 8.1 참조)
+ros2 launch control auto_driving.launch.py
 ```
 
 > 위 패키지명/런치 인자 등 정확한 명령은 실제 워크스페이스에서 확인 후 10번 "환경 메모"에 확정 기록하세요.
@@ -110,18 +111,25 @@ ros2 launch <bringup_pkg> auto_driving.launch.py
 
 현재 워크스페이스에는 다음 이슈가 있습니다. 관련 영역을 건드릴 때 반드시 고려하세요.
 
-### 8.1 자율주행 추론 경로 (패키지·인식 완료 → 주행 정책 미완)
+### 8.1 자율주행 추론 경로 (패키지·인식·주행 정책 대부분 완료 → ArUco/교차로/배선 잔여)
 - (해결됨) `auto_driving.launch.py`가 참조하던 **`inference_node`·`test19.h5`** 부재 문제는 해소되었습니다. `inference` 패키지를 신설하고 런치의 모델 참조를 `models/best.onnx`로 교체·빌드·검증했습니다. **`/control` 발행자 존재.**
 
 **진행 상황 (2026 갱신):**
 - **모델 형식 결정 완료** — **YOLO26n/ONNX로 통일**. Keras `.h5`(`test19.h5`) 경로 폐기.
 - **모델 학습 완료** — Colab에서 `yolo26n.pt` 파인튜닝, `best.pt`/`best.onnx` export. 경로·지표·클래스 매핑은 **10.1** 참조.
 - **추론 노드 구현·빌드·온디바이스 검증 완료** — `inference` 패키지 신설, onnxruntime/opencv 설치, ONNX 출력 레이아웃 실검증, 엔드투엔드 `/control` 발행 확인. 상세는 **10.2** 참조.
+- **주행 정책 구현 완료** — `inference_node`에 다음이 들어감(10.2):
+  - **차선 추종 조향** — `opencv_node`의 `/lane/offset`(Float32MultiArray `[offset, valid, curvature]`)에 대한 PD 제어 + 슬루 제한 + 차선 로스트 시 "마지막 조향 유지" 폴백.
+  - **출발 초록불 게이팅(B.1)** — `require_green_start`(기본 True): 초록불 확정 전까지 조향 중립·throttle 0.0, 확정 시 `started` 래치 후 순항.
+  - **좌/우 갈림길 분기(B.3)** — 표지판 확정 시 `turn_intent` 래치 + margin 게이팅(`sign_margin`/`sign_conf`) + `turn_bias` 조향 편향. 역방향 트랙은 `drive_direction`으로 미러링.
+  - **도착 빨간불 하드 정지(B.6)** — 빨간불 확정 시 항상 throttle 0.0으로 덮어씀.
+  - **순항 throttle** — 출발 후 `cruise_throttle`(0.13) 고정.
 
-**남은 작업 (핵심 — 인식→주행 연결):**
-1. **차선 추종 조향** — 현재 `inference_node`의 조향은 중립(STEER_TRIM) 고정. OpenCV 차선 신호를 받아(또는 별도 차선 노드) 조향을 산출해야 함.
-2. **미션 FSM** — 출발 초록불 게이팅(B.1), 좌/우 갈림길 분기(B.3, `turn_intent` 활용), 도착 빨간불 정지(B.6). 현재는 "빨간불 확정 시 정지"만 안전 게이트로 구현.
-3. **동적 장애물** — ArUco 마커 정지/재출발 상태 머신(B.4). YOLO가 아니라 별도 OpenCV `cv2.aruco` 경로로 구현. (→ 부록 D)
+**남은 작업:**
+1. **차선 신호 배선(배선 갭)** — `opencv_node`가 `/lane/offset`을 발행할 수 있지만 **`auto_driving.launch.py`에 `opencv_node`가 포함돼 있지 않음**(camera/control/joystick/battery/inference 5노드만 기동). 현재 launch 그대로면 `/lane/offset` 발행자가 없어 조향이 사실상 중립 유지. `opencv_node`를 launch에 추가하거나 별도 실행 필요.
+2. **커브 감속(B.2)** — `curve_slow` param과 로직 자리는 있으나 `compute_control`에서 잠정 비활성화(차선 신호 연동·튜닝 후 재도입 예정).
+3. **동적 장애물** — ArUco 마커 정지/재출발 상태 머신(B.4). YOLO가 아니라 별도 OpenCV `cv2.aruco` 경로로 구현. (→ 부록 D) **미구현.**
+4. **회전 교차로(B.5)** — 원형 궤적 추종 + 1바퀴 카운팅 + 탈출 분기. **미구현.**
 
 **추론 노드 주의 (검증으로 확정/갱신됨):**
 - ~~NMS-free 출력 순서 Netron 확인 필요~~ → **확인 완료**: 출력 `(1,300,6)`, 6값 = `[x1,y1,x2,y2,score,class_id]`, score 내림차순·NMS-free. 앵커 디코딩·NMS 재적용 금지. (`yolo_onnx.py`에 반영)
@@ -204,11 +212,16 @@ ros2 launch <bringup_pkg> auto_driving.launch.py
 - **ONNX 출력 레이아웃(실모델로 검증):** 입력 `images (1,3,640,640) float`, 출력 `output0 (1,300,6)`. 6값 순서 = **`[x1, y1, x2, y2, score, class_id]`** (좌표는 letterbox된 640 스케일, score 내림차순 정렬·NMS-free). Netron 없이 확인 완료 → `inference/yolo_onnx.py` 파싱과 일치.
 - **패키지 구조** (`src/inference/`, ament_python):
   - `inference/yolo_onnx.py` — letterbox 전처리 + onnxruntime 추론 + `(1,300,6)` 파싱(`Detection` dataclass 반환).
-  - `inference/inference_node.py` — 카메라 구독 → 추론 → 시간적 필터(9.5) → `/control` 발행.
+  - `inference/inference_node.py` — 카메라 구독 → 추론 → 시간적 필터(9.5) → 주행 정책(차선 추종 조향 + 출발 게이팅 + 갈림길 분기 + 빨간불 정지) → `/control` 발행. 차선 신호는 `/lane/offset` 구독, 인식 결과 디버그는 `/inference/detections`(JSON) 발행.
   - `setup.cfg` 필수(스크립트를 `lib/inference/`로 설치, `ros2 run` 인식). 누락 시 `bin/`에 설치돼 "No executable found" 발생.
-- **주요 ROS param(기본값):** `model_path`(=배포 onnx), `imgsz=640`, `conf_threshold=0.25`, `confirm_frames=3`(분기류), `stop_confirm_frames=2`(정지류·빨간불 우선), `cruise_throttle=0.0`(**안전 기본값 — 차 미이동**), `drive_direction=1.0`(역방향 트랙 시 -1.0로 좌/우 미러링). 토픽·`STEER_TRIM`은 `vehicle_config.yaml`에서 로드.
-- **엔드투엔드 검증:** 합성 이미지 → cv2 디코드 → ONNX 추론 → `/control` 발행 확인(`steering=0.10`=STEER_TRIM 중립, `throttle=0.0`).
-- **미완(8.1 TODO, 코드에 표기):** 조향은 중립 고정 → OpenCV 차선 추종 연동 필요, 미션 FSM(초록불 게이팅 B.1 / 갈림길 분기 B.3 / 도착 정지 B.6), ArUco 동적 장애물 정지·재출발(B.4, `cv2.aruco` 별도 경로).
+- **주요 ROS param(기본값):** `model_path`(=배포 onnx), `imgsz=640`, `conf_threshold=0.25`, `confirm_frames=3`(분기류), `stop_confirm_frames=2`(정지류·빨간불 우선), `cruise_throttle=0.13`(**초록불 확정 후 순항 throttle**; 확정 전·빨간불 시 0.0), `drive_direction=1.0`(역방향 트랙 시 -1.0로 좌/우 미러링). 토픽·`STEER_TRIM`은 `vehicle_config.yaml`에서 로드.
+- **엔드투엔드 검증:** 합성 이미지 → cv2 디코드 → ONNX 추론 → `/control` 발행 확인(초록불 미확정 상태라 `steering=0.10`=STEER_TRIM 중립, `throttle=0.0` — 출발 게이트 정상 동작). 초록불 확정 후에는 `cruise_throttle`(0.13)로 순항.
+- **주행 정책 관련 param(기본값):** `require_green_start=True`(B.1 게이트), `sign_margin=0.15`/`sign_conf=0.35`(좌/우 게이팅 B.3), `steer_kp=0.6`/`steer_kd=0.15`(차선 PD), `steer_sign=1.0`(배선 극성)/`steer_slew=0.15`(슬루), `turn_bias=0.25`(분기 편향), `curve_slow=0.5`(커브 감속 — 현재 비활성), `lane_offset_topic=/lane/offset`.
+- **미완(8.1 TODO, 코드에 표기):**
+  - **차선 신호 배선** — `opencv_node`가 `/lane/offset`을 발행하나 `auto_driving.launch.py`에 미포함 → launch 그대로면 조향 중립 유지. launch 추가 또는 별도 실행 필요.
+  - **커브 감속(B.2)** — `compute_control`에서 잠정 비활성화(튜닝 후 재도입).
+  - **ArUco 동적 장애물(B.4)** — 정지·재출발 상태 머신 미구현(`cv2.aruco` 별도 경로).
+  - **회전 교차로(B.5)** — 미구현.
 
 ### 10.2 Vision 학습 파이프라인 (재현용 메모)
 
@@ -320,14 +333,15 @@ src/
 ├── control/        [ament_python]  control/control_node.py
 │   └── launch/{auto_driving,manual_driving}.launch.py
 ├── control_msgs/   [ament_cmake]   msg/Control.msg
+├── inference/      [ament_python]  inference/inference_node.py, inference/yolo_onnx.py
 ├── joystick/       [ament_python]  joystick/joystick_node.py
 ├── joystick_msgs/  [ament_cmake]   msg/Joystick.msg
 ├── monitor/        [ament_python]  monitor/monitor_node.py  (+ templates/ static/)
-├── opencv/         [ament_python]  opencv/opencv_node.py
+├── opencv/         [ament_python]  opencv/opencv_node.py, opencv/lane_detect.py
 └── topst_utils/    [ament_python]  공용 유틸 (노드 없음)
 ```
 
-> launch 파일(`auto_driving.launch.py`)은 워크스페이스에 폴더가 없는 `inference` 패키지를 참조합니다(본문 8.1). 8.1 해결 시 이 트리에 `inference/` 패키지(YOLO26n `best.onnx` 포함)를 신설합니다.
+> `inference/` 패키지는 신설·빌드 완료되어 `auto_driving.launch.py`가 정상 기동합니다(YOLO26n `best.onnx`는 레포 루트 `models/`에 위치, 10.1). 단 launch는 camera/control/joystick/battery/inference 5노드만 띄우고 `opencv_node`는 포함하지 않습니다(차선 신호 `/lane/offset` 미발행 → 8.1).
 
 ## E.2 패키지별 노드 / 빌드 타입 / 설명
 
@@ -357,14 +371,15 @@ src/
 | **camera** | setuptools | rclpy, sensor_msgs, python3-opencv, python3-yaml |
 | **control** | setuptools | rclpy, **control_msgs**, **joystick_msgs**, picamera2, opencv-python, launch, launch_ros, joy |
 | **control_msgs** | (cmake) | ament_cmake, rosidl_default_generators, **std_msgs**, rosidl_default_runtime |
+| **inference** | setuptools | rclpy, sensor_msgs, **std_msgs**, **control_msgs**, python3-opencv, python3-numpy (+ onnxruntime는 pip 설치, 10.2) |
 | **joystick** | setuptools | rclpy, **control_msgs**, **joystick_msgs**, **topst_utils**, ament_index_python, **control**, launch, launch_ros, python3-yaml |
 | **joystick_msgs** | (cmake) | ament_cmake, rosidl_default_generators, **control_msgs**, **std_msgs**, rosidl_default_runtime |
 | **monitor** | setuptools, **flask** | rclpy, **battery_msgs**, **control_msgs**, **joystick_msgs**, sensor_msgs, ament_index_python, python3-flask |
-| **opencv** | setuptools | rclpy, sensor_msgs, python3-opencv |
+| **opencv** | setuptools | rclpy, sensor_msgs, **std_msgs**, python3-opencv |
 | **topst_utils** | setuptools | (런타임 depend 없음 — 순수 Python 유틸) |
 
 > `joystick`이 `control`을 exec_depend로 가지는 역의존은 본문 8.4 참조.
-> 신설할 `inference` 패키지는 최소한 rclpy, sensor_msgs, **control_msgs**, onnxruntime(또는 채택 런타임), opencv-python에 의존할 것으로 예상(8.1 구현 시 확정 기록).
+> `inference` 패키지의 `onnxruntime`은 rosdep 키가 없어 `package.xml`에 없고 pip(user-site)로 설치했습니다(10.2). `opencv`는 `/lane/offset`(Float32MultiArray) 발행을 위해 `std_msgs`에 의존합니다.
 
 **data_files** (함께 설치되는 리소스):
 
@@ -402,10 +417,12 @@ joystick_msgs/Joystick.msg
 | 메시지 타입 | 발행 (Pub) | 구독 (Sub) | 토픽 (기본값) |
 |---|---|---|---|
 | **battery_msgs/Battery** | `battery_node` | `monitor_node` | `battery_status` (config: `/battery_status`) |
-| **control_msgs/Control** | (신설 `inference_node` — YOLO26n 추론, 8.1) | `control_node`, `monitor_node` | `/control` |
+| **control_msgs/Control** | `inference_node` (YOLO26n 추론+주행 정책, 8.1) | `control_node`, `monitor_node` | `/control` |
 | **joystick_msgs/Joystick** | `joystick_node` | `control_node`, `monitor_node` | `joystick` |
 | **sensor_msgs/CompressedImage** | `camera_node` | `opencv_node`, `monitor_node` | `/camera/image/compressed` |
 | **sensor_msgs/CompressedImage** (전처리) | `opencv_node` (gray/blur/edge) | `monitor_node` (debug_image=true 시) | `/opencv/image/{grayscale,blur,edge}` |
+| **std_msgs/Float32MultiArray** (차선 `[offset,valid,curvature]`) | `opencv_node` (publish_lane=true 시) | `inference_node` (조향 융합) | `/lane/offset` |
+| **std_msgs/String** (인식 결과 JSON, 디버그) | `inference_node` | (echo/모니터) | `/inference/detections` |
 
 - `control_node`는 `joystick`(수동, Joystick)과 `/control`(자율, Control)을 **모두 구독**하고, `Joystick.e_stop_en`으로 비상정지를 처리합니다.
 - `control_node`는 토픽을 발행하지 않고 **PCA9685(I2C)로 모터/서보를 직접 구동**합니다.
@@ -422,13 +439,14 @@ joystick_msgs/Joystick.msg
    │ camera_node├──────────────┬─────────────►│opencv_node├──────────────┐
    └───────────┘              │              └───────────┘              │
                               │                                          ▼
-                              │   (※ inference_node:                ┌───────────────┐
-                              │    워크스페이스에 없음 → 8.1,        │  monitor_node │
-                              │     YOLO26n best.onnx 탑재 예정)     │  (Flask 대시보드)│
-                              ▼                                    └───────▲───────┘
+                              │   (opencv_node 는 launch 미포함 → 8.1  ┌───────────────┐
+                              │    /lane/offset 쓰려면 별도 실행)      │  monitor_node │
+                              │   inference_node: YOLO26n best.onnx   │  (Flask 대시보드)│
+                              ▼   + 주행 정책 (조향/게이팅/분기/정지)   └───────▲───────┘
                        ┌──────────────┐   /control                        │
                        │inference_node│──────────────┐                    │
-                       └──────────────┘              ▼                    │
+                       └──────▲───────┘              ▼                    │
+                    /lane/offset (opencv_node)         │                  │
    ┌────────────┐ joystick(Joystick)          ┌────────────┐             │
    │joystick_node├──────────────────┬─────────►│control_node│             │
    └────────────┘                   │          └─────┬──────┘             │
@@ -453,7 +471,9 @@ joystick_msgs/Joystick.msg
 camera_node   ──/camera/image/compressed (CompressedImage)──►  opencv_node, monitor_node
 opencv_node   ──/opencv/image/{grayscale,blur,edge} (Compressed)─►  monitor_node
 joystick_node ──/joystick (Joystick)──►  control_node, monitor_node
-inference_node──/control (Control)──►  control_node, monitor_node   (※ 외부 패키지, 8.1 / YOLO26n)
+opencv_node   ──/lane/offset (Float32MultiArray)──►  inference_node   (publish_lane=true 시)
+inference_node──/control (Control)──►  control_node, monitor_node   (YOLO26n 추론+주행 정책, 8.1)
+inference_node──/inference/detections (String, JSON)──►  디버그(echo/모니터)
 battery_node  ──/battery_status (Battery)──►  monitor_node
 control_node  ──(토픽 발행 없음)──► PCA9685 I2C 하드웨어 직접 제어
 ```
