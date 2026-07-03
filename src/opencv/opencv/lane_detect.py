@@ -1,21 +1,21 @@
-"""Rule-based lane offset estimation (CLAUDE.md 8.1 TODO — lane following).
+"""규칙 기반 차선 오프셋 추정 (CLAUDE.md 8.1 TODO — 차선 추종).
 
-Design (see the design note in inference_node.compute_control):
-    Hough two-line fitting is fragile on dashed lines, shadows and sharp
-    curves. For a completion-first hackathon we instead use a *band-centroid*
-    method: split a bottom ROI into a few horizontal bands, binarize the lane
-    pixels, and take the horizontal centroid of lane mass in each band. The
-    lateral error is how far that centroid sits from image center; comparing a
-    near band to a far band gives a cheap curvature (feed-forward) estimate.
+설계 (inference_node.compute_control 의 설계 주석 참조):
+    Hough 2-라인 피팅은 점선·그림자·급커브에서 쉽게 깨집니다. 완주 우선
+    해커톤에서는 대신 *밴드 무게중심(band-centroid)* 방식을 씁니다: 하단 ROI를
+    몇 개의 수평 밴드로 나누고, 각 밴드에서 차선 픽셀을 이진화한 뒤 차선 질량의
+    가로 무게중심을 구합니다. 그 무게중심이 이미지 중앙에서 얼마나 벗어났는지가
+    횡오차이며, 가까운 밴드와 먼 밴드를 비교하면 값싼 곡률(피드포워드) 추정치를
+    얻습니다.
 
-This module is pure (no ROS) so it can be unit-tested and tuned offline.
+이 모듈은 순수 함수(ROS 비의존)라 오프라인에서 단위 테스트·튜닝이 가능합니다.
 
-Returns a LaneResult with:
-    offset    normalized lateral error in [-1, 1]; <0 = lane center is to the
-              LEFT of the image center (car should steer left), >0 = to the
-              right. Sign→steering mapping is applied downstream (steer_sign).
-    valid     True if enough lane pixels were found to trust `offset`.
-    curvature far_band_offset - near_band_offset, ~ upcoming bend (can be 0).
+반환하는 LaneResult 필드:
+    offset    [-1, 1]로 정규화된 횡오차. <0 = 차선 중앙이 이미지 중앙보다
+              왼쪽(차는 좌조향해야 함), >0 = 오른쪽. 부호→조향 매핑은
+              하류(steer_sign)에서 적용.
+    valid     `offset`을 신뢰할 만큼 차선 픽셀이 충분히 검출됐으면 True.
+    curvature 먼_밴드_offset - 가까운_밴드_offset, ~ 다가오는 커브 (0일 수 있음).
 """
 
 from dataclasses import dataclass
@@ -31,16 +31,16 @@ class LaneResult:
     curvature: float
 
 
-# Polarity: are lane markings brighter or darker than the road surface?
-POLARITY_LIGHT = 'light'  # bright tape/paint on a darker floor
-POLARITY_DARK = 'dark'    # dark lines on a lighter floor
+# 극성(polarity): 차선 표시가 노면보다 밝은가 어두운가?
+POLARITY_LIGHT = 'light'  # 어두운 바닥 위 밝은 테이프/도색
+POLARITY_DARK = 'dark'    # 밝은 바닥 위 어두운 라인
 
 
 def _binarize_lane(gray, polarity):
-    """Adaptive threshold → binary mask where 255 = lane pixel.
+    """adaptive threshold → 차선 픽셀=255 인 이진 마스크.
 
-    Adaptive (not global Otsu) so uneven lighting / shadows across the ROI do
-    not wipe out one side of the lane.
+    (전역 Otsu 가 아니라) adaptive 를 쓰는 이유: ROI 전반의 불균일한 조명·그림자
+    때문에 한쪽 차선이 통째로 지워지지 않게 하기 위함.
     """
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
     thresh_type = (cv2.THRESH_BINARY if polarity == POLARITY_LIGHT
@@ -64,10 +64,10 @@ def compute_lane_offset(
     valid_min_px=40,
     polarity=POLARITY_LIGHT,
 ):
-    """Estimate normalized lateral lane offset from a BGR frame.
+    """BGR 프레임에서 정규화된 횡방향 차선 오프셋을 추정.
 
-    Parameters mirror ROS params on opencv_node so tuning is done from config,
-    not code (CLAUDE.md 9.4). See module docstring for the returned fields.
+    파라미터는 opencv_node 의 ROS param 과 대응 — 튜닝을 코드가 아닌 설정에서
+    하도록 함 (CLAUDE.md 9.4). 반환 필드는 모듈 독스트링 참조.
     """
     if image_bgr is None or image_bgr.size == 0:
         return LaneResult(0.0, False, 0.0)
@@ -88,12 +88,12 @@ def compute_lane_offset(
     num_bands = max(1, int(num_bands))
     band_h = max(1, roi_h // num_bands)
 
-    # Column index vector, reused per band for the mass-weighted centroid.
+    # 열 인덱스 벡터 — 밴드마다 질량 가중 무게중심 계산에 재사용.
     cols = np.arange(roi_w, dtype=np.float32)
 
-    band_offsets = []  # (band_index, normalized_offset); index 0 = nearest (bottom)
+    band_offsets = []  # (밴드 인덱스, 정규화 오프셋); 인덱스 0 = 가장 가까움(하단)
     for i in range(num_bands):
-        # Band 0 is the bottom-most (nearest) slice of the ROI.
+        # 밴드 0 이 ROI 의 최하단(가장 가까운) 슬라이스.
         y1 = roi_h - (i + 1) * band_h
         y2 = roi_h - i * band_h
         y1 = max(0, y1)
@@ -110,8 +110,8 @@ def compute_lane_offset(
     if not band_offsets:
         return LaneResult(0.0, False, 0.0)
 
-    # Weight nearer bands more (they reflect current position); farther bands
-    # act as light feed-forward. Weight = num_bands - band_index.
+    # 가까운 밴드에 더 큰 가중치(현재 위치 반영), 먼 밴드는 약한 피드포워드.
+    # 가중치 = num_bands - 밴드 인덱스.
     weight_sum = 0.0
     offset_acc = 0.0
     near_off = None
@@ -122,7 +122,7 @@ def compute_lane_offset(
         weight_sum += weight
         if band_index == band_offsets[0][0]:
             near_off = off
-        far_off = off  # last kept band = farthest valid
+        far_off = off  # 마지막으로 채택된 밴드 = 가장 먼 유효 밴드
 
     offset = offset_acc / weight_sum if weight_sum > 0 else 0.0
     curvature = (far_off - near_off) if (near_off is not None and far_off is not None) else 0.0

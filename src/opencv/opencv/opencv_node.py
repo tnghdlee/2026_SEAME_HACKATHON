@@ -17,18 +17,18 @@ class OpenCvNode(Node):
         self.declare_parameter('jpeg_quality', 90)
         self.declare_parameter('debug_log', True)
 
-        # --- Lane-following offset (CLAUDE.md 8.1) ---
-        # Published as Float32MultiArray [offset, valid, curvature] for
-        # inference_node to fuse into steering. Kept as ROS params so the ROI
-        # and binarization can be tuned on the real track (CLAUDE.md 9.4).
+        # --- 차선 추종 오프셋 (CLAUDE.md 8.1) ---
+        # inference_node 가 조향에 융합하도록 Float32MultiArray
+        # [offset, valid, curvature] 로 발행. ROI 와 이진화를 실트랙에서 튜닝할 수
+        # 있도록 ROS param 으로 노출 (CLAUDE.md 9.4).
         self.declare_parameter('publish_lane', True)
         self.declare_parameter('lane_offset_topic', '/lane/offset')
-        self.declare_parameter('roi_top', 50)     # matches vehicle_config ROI_TOP
+        self.declare_parameter('roi_top', 50)     # vehicle_config 의 ROI_TOP 과 일치
         self.declare_parameter('roi_left', 0)
         self.declare_parameter('lane_num_bands', 3)
         self.declare_parameter('lane_valid_min_px', 40)
-        # 'light' = bright lane on darker floor, 'dark' = dark lines on lighter
-        # floor. Set after inspecting a real track frame.
+        # 'light' = 어두운 바닥 위 밝은 차선, 'dark' = 밝은 바닥 위 어두운 라인.
+        # 실트랙 프레임을 확인한 뒤 설정할 것.
         self.declare_parameter('lane_polarity', 'light')
 
         subscribe_topic = str(self.get_parameter('subscribe_topic').value)
