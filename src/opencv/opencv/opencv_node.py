@@ -30,6 +30,12 @@ class OpenCvNode(Node):
         # 'light' = 어두운 바닥 위 밝은 차선, 'dark' = 밝은 바닥 위 어두운 라인.
         # 실트랙 프레임을 확인한 뒤 설정할 것.
         self.declare_parameter('lane_polarity', 'light')
+        # 검출 방식: 'color'=HSV 색 마스크(유색 라인에 강건), 'brightness'=명암.
+        # 흰 바닥 위 주황 라인 트랙은 'color' + 아래 주황 HSV 범위 권장.
+        self.declare_parameter('lane_method', 'color')
+        # 주황 라인 기본 HSV 범위(OpenCV H 0~180). 실측: 주황≈H5~22.
+        self.declare_parameter('lane_hsv_lower', [5, 80, 80])
+        self.declare_parameter('lane_hsv_upper', [22, 255, 255])
 
         subscribe_topic = str(self.get_parameter('subscribe_topic').value)
         self.jpeg_quality = int(self.get_parameter('jpeg_quality').value)
@@ -42,6 +48,9 @@ class OpenCvNode(Node):
         self.lane_num_bands = int(self.get_parameter('lane_num_bands').value)
         self.lane_valid_min_px = int(self.get_parameter('lane_valid_min_px').value)
         self.lane_polarity = str(self.get_parameter('lane_polarity').value)
+        self.lane_method = str(self.get_parameter('lane_method').value)
+        self.lane_hsv_lower = [int(v) for v in self.get_parameter('lane_hsv_lower').value]
+        self.lane_hsv_upper = [int(v) for v in self.get_parameter('lane_hsv_upper').value]
 
         if not 0 <= self.jpeg_quality <= 100:
             raise ValueError('jpeg_quality must be in range [0, 100]')
@@ -138,6 +147,9 @@ class OpenCvNode(Node):
                 num_bands=self.lane_num_bands,
                 valid_min_px=self.lane_valid_min_px,
                 polarity=self.lane_polarity,
+                method=self.lane_method,
+                hsv_lower=self.lane_hsv_lower,
+                hsv_upper=self.lane_hsv_upper,
             )
             lane_msg = Float32MultiArray()
             lane_msg.data = [lane.offset, 1.0 if lane.valid else 0.0, lane.curvature]

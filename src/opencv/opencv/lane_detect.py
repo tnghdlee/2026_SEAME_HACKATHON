@@ -35,6 +35,25 @@ class LaneResult:
 POLARITY_LIGHT = 'light'  # 어두운 바닥 위 밝은 테이프/도색
 POLARITY_DARK = 'dark'    # 밝은 바닥 위 어두운 라인
 
+# 검출 방식: 'brightness'=그레이스케일 명암(폴라리티), 'color'=HSV 색 마스크.
+# 색 라인(예: 흰 바닥 위 주황 라인)은 'color' 가 훨씬 강건하다 — 그레이스케일은
+# 광택 바닥의 반사·주름을 라인으로 오검출한다(실측 확인).
+METHOD_BRIGHTNESS = 'brightness'
+METHOD_COLOR = 'color'
+
+
+def _color_mask(roi_bgr, hsv_lower, hsv_upper):
+    """HSV inRange 로 특정 색(예: 주황) 라인만 남긴 이진 마스크.
+
+    hsv_lower/upper 는 (H, S, V) 튜플. OpenCV H 범위는 0~180 이다
+    (주황≈5~22, 노랑≈22~38). 저채도(흰/회색 바닥)는 S 하한으로 걸러진다.
+    """
+    blur = cv2.GaussianBlur(roi_bgr, (5, 5), 0)
+    hsv = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
+    lower = np.array(hsv_lower, dtype=np.uint8)
+    upper = np.array(hsv_upper, dtype=np.uint8)
+    return cv2.inRange(hsv, lower, upper)
+
 
 def _binarize_lane(gray, polarity):
     """adaptive threshold → 차선 픽셀=255 인 이진 마스크.
@@ -63,11 +82,18 @@ def compute_lane_offset(
     num_bands=3,
     valid_min_px=40,
     polarity=POLARITY_LIGHT,
+    method=METHOD_BRIGHTNESS,
+    hsv_lower=(5, 80, 80),
+    hsv_upper=(22, 255, 255),
 ):
     """BGR 프레임에서 정규화된 횡방향 차선 오프셋을 추정.
 
     파라미터는 opencv_node 의 ROS param 과 대응 — 튜닝을 코드가 아닌 설정에서
     하도록 함 (CLAUDE.md 9.4). 반환 필드는 모듈 독스트링 참조.
+
+    method='color' 이면 HSV 색 마스크(hsv_lower~hsv_upper)로 라인을 검출한다.
+    흰/회색 바닥 위 유색 라인에는 이쪽이 강건하다. 'brightness' 는 기존
+    그레이스케일 명암(polarity) 방식.
     """
     if image_bgr is None or image_bgr.size == 0:
         return LaneResult(0.0, False, 0.0)
@@ -80,8 +106,11 @@ def compute_lane_offset(
     if roi.size == 0:
         return LaneResult(0.0, False, 0.0)
 
-    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    mask = _binarize_lane(gray, polarity)
+    if method == METHOD_COLOR:
+        mask = _color_mask(roi, hsv_lower, hsv_upper)
+    else:
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        mask = _binarize_lane(gray, polarity)
 
     roi_h, roi_w = mask.shape[:2]
     half_w = roi_w / 2.0
