@@ -46,7 +46,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'cruise_throttle',
-            default_value='0.2',
+            default_value='0.18',
             description='직진 순항 throttle. 조향만 점검하려면 0.0 으로 주면 바퀴가 안 돈다.',
         ),
         Node(
@@ -122,14 +122,21 @@ def generate_launch_description():
                 {
                     'model_path': model_path,
                     'vehicle_config_file': vehicle_config_path,
+                    # --- 인식 확정 프레임(반응 지연 직결. YOLO ≈3Hz → 프레임당 ~0.3s) ---
+                    'start_confirm_frames': 2,  # 초록불 출발 (2≈0.6s, 1≈0.3s)
+                    'confirm_frames': 2,        # 좌/우 표지판 분기 (margin 게이팅이 보호)
+                    'stop_confirm_frames': 2,   # 빨간불 정지
                     # 출발 게이트/순항 — 런타임 인자로 노출(라인 트래킹 점검용).
                     'require_green_start': ParameterValue(
                         require_green_start, value_type=bool),
                     # --- throttle (트랙 현장 조정 대상) ---
                     'cruise_throttle': ParameterValue(
                         cruise_throttle, value_type=float),  # 직진 순항 (기본 0.2)
-                    'corner_throttle': 0.18,   # 코너 감속 throttle
-                    'corner_curvature_threshold': 0.08,  # 코너 판정 곡률 임계
+                    'corner_throttle': 0.17,   # 코너 감속 throttle
+                    # 코너 판정 곡률 임계(정규화 [-1,1] 스케일). 트랙 curvature 로그로 조정.
+                    'corner_curvature_threshold': 0.30,
+                    # 커브 진입 전 예측 감속 홀드 계수(0~1). 클수록 더 일찍/오래 감속 유지.
+                    'curve_hold_decay': 0.85,
                     'turn_throttle': 0.13,     # 갈림길 커밋 중 감속
                     # --- 조향 (트랙 현장 조정 대상) ---
                     'steer_sign': -1.0,        # 전체 조향 극성(벤치서 반대면 뒤집기)

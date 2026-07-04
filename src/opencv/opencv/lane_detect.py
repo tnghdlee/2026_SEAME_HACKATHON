@@ -15,7 +15,9 @@
               왼쪽(차는 좌조향해야 함), >0 = 오른쪽. 부호→조향 매핑은
               하류(steer_sign)에서 적용.
     valid     `offset`을 신뢰할 만큼 차선 픽셀이 충분히 검출됐으면 True.
-    curvature 먼_밴드_offset - 가까운_밴드_offset, ~ 다가오는 커브 (0일 수 있음).
+    curvature [-1, 1]로 정규화된 곡률 추정치. (먼_밴드_offset - 가까운_밴드_offset)를
+              /2 하여 정규화(원시 차이 범위 [-2, 2] → [-1, 1]). |curvature| 가 클수록
+              다가오는 커브가 급함. 0 = 직진(밴드 간 오프셋 차 없음). 부호는 커브 방향.
 """
 
 from dataclasses import dataclass
@@ -29,6 +31,7 @@ class LaneResult:
     offset: float
     valid: bool
     curvature: float
+    pixels: int = 0  # 검출된 차선 픽셀 총수(가장 가까운 유효 밴드 기준) — 로깅/튜닝용.
 
 
 # 극성(polarity): 차선 표시가 노면보다 밝은가 어두운가?
@@ -112,6 +115,9 @@ def compute_lane_offset(
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         mask = _binarize_lane(gray, polarity)
 
+    # ROI 전체에서 검출된 라인 픽셀 총수 — valid_min_px 튜닝/로깅용.
+    total_px = int((mask > 0).sum())
+
     roi_h, roi_w = mask.shape[:2]
     half_w = roi_w / 2.0
     num_bands = max(1, int(num_bands))
@@ -137,7 +143,7 @@ def compute_lane_offset(
         band_offsets.append((i, (centroid_x - half_w) / half_w))
 
     if not band_offsets:
-        return LaneResult(0.0, False, 0.0)
+        return LaneResult(0.0, False, 0.0, pixels=total_px)
 
     # 가까운 밴드에 더 큰 가중치(현재 위치 반영), 먼 밴드는 약한 피드포워드.
     # 가중치 = num_bands - 밴드 인덱스.
@@ -154,7 +160,13 @@ def compute_lane_offset(
         far_off = off  # 마지막으로 채택된 밴드 = 가장 먼 유효 밴드
 
     offset = offset_acc / weight_sum if weight_sum > 0 else 0.0
-    curvature = (far_off - near_off) if (near_off is not None and far_off is not None) else 0.0
+
+    # 곡률 = 먼_밴드_offset - 가까운_밴드_offset. 밴드 오프셋은 각각 [-1, 1] 이므로
+    # 원시 차이 범위는 [-2, 2]. /2 로 [-1, 1] 정규화해 코너 임계를 스케일-안정적으로
+    # (offset 과 같은 [-1,1] 단위로) 비교할 수 있게 한다. 순수 횡이동(직선 차선이
+    # 중앙에서 벗어난 경우)은 near≈far → curvature≈0 이라 위치와 무관한 곡률 지표다.
+    raw_curvature = (far_off - near_off) if (near_off is not None and far_off is not None) else 0.0
+    curvature = float(np.clip(raw_curvature / 2.0, -1.0, 1.0))
 
     offset = float(np.clip(offset, -1.0, 1.0))
-    return LaneResult(offset, True, float(curvature))
+    return LaneResult(offset, True, curvature, pixels=total_px)

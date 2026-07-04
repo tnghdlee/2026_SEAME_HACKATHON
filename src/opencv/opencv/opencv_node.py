@@ -92,6 +92,8 @@ class OpenCvNode(Node):
                 lane_offset_topic,
                 10,
             )
+        # 차선 검출 진단 로깅용 프레임 카운터(매 프레임 대신 스로틀).
+        self._lane_log_count = 0
 
         self.get_logger().info(
             f'OpenCV node started: subscribe_topic={subscribe_topic}, '
@@ -154,6 +156,19 @@ class OpenCvNode(Node):
             lane_msg = Float32MultiArray()
             lane_msg.data = [lane.offset, 1.0 if lane.valid else 0.0, lane.curvature]
             self.lane_pub.publish(lane_msg)
+
+            # 차선 검출 진단 로깅 — 약 15프레임마다 valid/offset/curvature/픽셀수를
+            # 출력한다. valid=False 인데 pixels 가 valid_min_px(기본 40) 근처면
+            # HSV/threshold 범위가 라인 색과 안 맞는 것이고, pixels 가 0 이면
+            # ROI 안에 검출 색이 아예 없다는 뜻(라인 색/조명/ROI 재확인).
+            self._lane_log_count += 1
+            if self._lane_log_count >= 15:
+                self._lane_log_count = 0
+                self.get_logger().info(
+                    f'lane: valid={lane.valid} offset={lane.offset:+.3f} '
+                    f'curvature={lane.curvature:+.3f} pixels={lane.pixels} '
+                    f'(method={self.lane_method}, valid_min_px={self.lane_valid_min_px})'
+                )
 
         if self.debug_log:
             self.get_logger().info('Published grayscale/blur/edge frames')
