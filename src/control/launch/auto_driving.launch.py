@@ -83,6 +83,9 @@ def generate_launch_description():
                 {
                     'model_path': model_path,
                     'vehicle_config_file': vehicle_config_path,
+                    'cruise_throttle': 0.15,
+                    'turn_throttle': 0.13,
+                    'steer_sign': -1.0,
                 },
             ],
         ),
