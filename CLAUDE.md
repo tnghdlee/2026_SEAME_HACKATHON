@@ -127,21 +127,25 @@ ros2 launch control auto_driving.launch.py
 
 **남은 작업:**
 1. **차선 신호 배선(배선 갭)** — `opencv_node`가 `/lane/offset`을 발행할 수 있지만 **`auto_driving.launch.py`에 `opencv_node`가 포함돼 있지 않음**(camera/control/joystick/battery/inference 5노드만 기동). 현재 launch 그대로면 `/lane/offset` 발행자가 없어 조향이 사실상 중립 유지. `opencv_node`를 launch에 추가하거나 별도 실행 필요.
+   - ⚠️ **8.2(토픽 슬래시 불일치)와 맞물리는 리스크**: `opencv_node`를 launch에 추가할 때 `opencv_node`가 발행하는 차선 토픽명(`lane_offset_topic` param 기본값 `/lane/offset`)과 `inference_node`의 `lane_offset_topic` 기본값(`/lane/offset`)이 **양쪽에서 정확히 일치**하는지 반드시 확인할 것. 8.2의 절대/상대(슬래시 有/無) 표기 불일치가 여기서 재발하면 — 예: 한쪽은 `/lane/offset`, 다른 쪽은 `lane/offset`(네임스페이스 상대) — **두 노드는 정상 기동하지만 토픽이 연결되지 않아 조향이 계속 중립 유지**된다. 발행/구독 자체는 에러 없이 뜨므로 원인 파악이 특히 어렵다. config 로드 여부에 따라 토픽명이 바뀔 수 있으니 실제 `ros2 topic list`/`ros2 topic info`로 연결을 확인할 것.
 2. **커브 감속(B.2)** — `curve_slow` param과 로직 자리는 있으나 `compute_control`에서 잠정 비활성화(차선 신호 연동·튜닝 후 재도입 예정).
 3. **동적 장애물** — ArUco 마커 정지/재출발 상태 머신(B.4). YOLO가 아니라 별도 OpenCV `cv2.aruco` 경로로 구현. (→ 부록 D) **미구현.**
 4. **회전 교차로(B.5)** — 원형 궤적 추종 + 1바퀴 카운팅 + 탈출 분기. **미구현.**
+
+> **안정화 순서(중요)**: 위 잔여 작업은 **① 차선 배선(작업 ①) → ② 커브 감속(B.2) 재활성 → ③ 그 뒤에 `cruise_throttle`(0.13) 순항을 신뢰**하는 순서로 진행할 것. 근거: 차선 신호(`/lane/offset`)가 배선되기 전에는 조향이 중립 유지라 순항 throttle을 올리면 그대로 직진해 차선을 이탈하고, 커브 감속이 꺼진 상태에서 순항 속도를 신뢰하면 급커브에서 이탈한다. 9번 원칙 1·2(완주>속도, 차선 이탈 = +30s)상 이탈 페널티가 순주행 시간보다 크므로, 차선 추종·커브 감속이 검증되기 전까지 순항 속도를 낙관하지 말 것.
 
 **추론 노드 주의 (검증으로 확정/갱신됨):**
 - ~~NMS-free 출력 순서 Netron 확인 필요~~ → **확인 완료**: 출력 `(1,300,6)`, 6값 = `[x1,y1,x2,y2,score,class_id]`, score 내림차순·NMS-free. 앵커 디코딩·NMS 재적용 금지. (`yolo_onnx.py`에 반영)
 - ~~런타임 선택~~ → **확정**: ONNX Runtime(CPUExecutionProvider) 채택·설치 완료(10.2).
 - **검증 지표 낙관 가능성** — 데이터셋 내부 mAP50이 0.99로 매우 높으나 연속 프레임 train/val 누수 가능성이 있어 **실트랙 성능은 더 낮을 수 있음.** 실환경 프레임 재검증 + 9.5(시간적 필터링, 이미 `inference_node`에 구현) 적용.
-- **좌/우 표지판 혼동 주의 (근본 원인 규명됨)** — 검증에서 `left_sign` recall이 0.866으로 유일하게 낮고 `right_sign` precision이 0.942였습니다. 좌↔우 오분류가 있다면 B.3 기준 **방향 오주행 → 미션 실패**로 직결됩니다. **원인 확인: 학습 시 `fliplr=0.5`(좌우 반전 augmentation)로 인해 좌회전 표지판이 우회전 모양으로 뒤집혀도 라벨이 `left_sign`으로 남아 좌↔우가 구조적으로 섞임.** 데이터 보강만으로는 해결 안 되며 **`fliplr=0.0` 재학습이 근본 해결**(상세·재배포 절차 10.2). 재학습 전까지는 `inference_node`의 margin 게이팅(`sign_margin`/`sign_conf`)이 오주행을 완화(10.2). `confusion_matrix.png`로 혼동 정도를 확인하세요.
+- **좌/우 표지판 혼동 주의 (근본 원인 규명됨)** — 검증에서 `left_sign` recall이 0.866으로 유일하게 낮고 `right_sign` precision이 0.942였습니다. 좌↔우 오분류가 있다면 B.3 기준 **방향 오주행 → 미션 실패**로 직결됩니다. **원인 확인: 학습 시 `fliplr=0.5`(좌우 반전 augmentation)로 인해 좌회전 표지판이 우회전 모양으로 뒤집혀도 라벨이 `left_sign`으로 남아 좌↔우가 구조적으로 섞임.** 데이터 보강만으로는 해결 안 되며 **`fliplr=0.0` 재학습이 근본 해결**(상세·재배포 절차 10.3). 재학습 전까지는 `inference_node`의 margin 게이팅(`sign_margin`/`sign_conf`)이 오주행을 완화(10.2). `confusion_matrix.png`로 혼동 정도를 확인하세요.
 
 ### 8.2 토픽명 슬래시 불일치 가능성
 - 노드 **파라미터 기본값**: `battery_status`, `joystick` (슬래시 **없음** → 상대 네임스페이스)
 - `vehicle_config.yaml`: `/battery_status`, `/joystick` (슬래시 **있음** → 절대 네임스페이스)
 - 설정 파일 로드 여부에 따라 **토픽 네임스페이스가 달라져** 노드 간 연결이 끊길 수 있습니다.
 - **조치**: 토픽 관련 작업 시 어느 쪽이 실제 사용되는지 확인하고, **절대/상대 표기를 한 쪽으로 통일**하세요. 확정값은 10번에 기록.
+- ⚠️ **8.1 잔여 작업 ①(차선 신호 배선)에 직접 영향**: `opencv_node`를 `auto_driving.launch.py`에 추가할 때 이 슬래시 불일치가 `/lane/offset`에도 재발하면, 두 노드가 정상 기동해도 조향이 계속 중립 유지되어 원인 파악이 어렵다. 배선 추가 시 발행/구독 토픽명이 양쪽에서 정확히 일치하는지 반드시 확인할 것(8.1 ① 참조).
 
 ### 8.3 joystick 패키지 data_files 미설치
 - `joystick` 패키지의 `setup.py`가 `launch/*.yaml`, `config/*.yaml` 설치를 선언하지만, **실제 폴더가 비어 있습니다.**
@@ -177,11 +181,19 @@ ros2 launch control auto_driving.launch.py
   colcon build              # 나머지 기능 패키지 (inference 포함)
   source install/setup.bash
   ```
-- 자율주행 launch 명령·인자: `ros2 launch control auto_driving.launch.py` (인자 `model_path` 기본값 = 배포 onnx, 10.1). ※ inference 노드 구현 완료(아래 10.2), 단 주행 정책은 미완(8.1 TODO).
+- 자율주행 launch 명령·인자: `ros2 launch control auto_driving.launch.py` (인자 `model_path` 기본값 = 배포 onnx, 10.1). ※ inference 노드 구현 완료(아래 10.2). 주행 정책은 대부분 구현됨(차선 추종 조향·초록불 게이팅·갈림길 분기·빨간불 정지·순항 throttle) — ArUco 동적 장애물·회전 교차로·커브 감속·차선 배선만 잔여(8.1 TODO).
 - 5종 모니터 토픽 목록: `/camera/image/compressed`, `/opencv/image/{grayscale,blur,edge}`, `/joystick`, `/control`, `/battery_status` (부록 E.4).
 - 토픽명 슬래시 표기 최종 통일안 (8.2 결론): _(미확정 — inference_node는 config의 `IMAGE_TOPIC`/`CONTROL_TOPIC`(둘 다 슬래시 有)을 우선 사용)_
 - 추론 노드 입출력 인터페이스 / `/control` 메시지 타입: **구현 완료(10.2).** 입력 `/camera/image/compressed`(sensor_msgs/CompressedImage), 출력 `/control`(control_msgs/Control: header, steering, throttle). 부록 E.4 참조.
-- 카메라/차선 OpenCV 임계값: _(튜닝 후 기록)_
+- 카메라/차선 OpenCV 임계값 (`opencv/lane_detect.py` + `opencv_node.py` 실측):
+  - **검출 방식**: Hough 라인 피팅이 아니라 **밴드 무게중심(band-centroid)** — 하단 ROI를 수평 밴드로 나눠 각 밴드의 차선 픽셀 가로 무게중심으로 오프셋 산출. 두 이진화 경로 지원:
+    - `method='brightness'` — 그레이스케일 + **adaptive threshold**(`ADAPTIVE_THRESH_MEAN_C`, `blockSize=25`, `C=∓10`, 불균일 조명 대응). `polarity`(`light`/`dark`)로 라인이 노면보다 밝은지/어두운지 지정.
+    - `method='color'` — **HSV `inRange`** 색 마스크(주황 라인용 기본 `hsv_lower=[5,80,80]`/`hsv_upper=[22,255,255]`, OpenCV H 0~180). 흰/회색 바닥 위 유색 라인에 강건.
+    - ⚠️ **조명 민감성(코드 주석에 명시)**: `brightness` 경로는 광택 바닥의 반사·주름을 라인으로 오검출한다(실측). 그래서 `opencv_node`의 **`lane_method` 기본값은 `color`**(`lane_detect.py` 함수 기본값은 `brightness`이나 노드가 덮어씀). adaptive threshold를 쓰는 이유도 ROI 전반의 그림자로 한쪽 라인이 통째로 지워지는 것을 막기 위함.
+  - **ROI/밴드 기본값(ROS param 노출)**: `roi_top=50`(vehicle_config의 `ROI_TOP`과 일치), `roi_left=0`, `lane_num_bands=3`, `lane_valid_min_px=40`(밴드별 유효 픽셀 하한). 전처리 blur는 `GaussianBlur(5,5)`.
+  - **`/lane/offset` 산출**: 밴드별 정규화 오프셋을 `weight=num_bands-band_index`(가까운 밴드 가중)로 가중평균 → `offset∈[-1,1]`. `valid`=유효 밴드 1개 이상. `curvature=(먼밴드off - 가까운밴드off)/2` clip `[-1,1]`. 발행 배열은 `[offset, valid, curvature]`.
+  - **Canny 디버그 영상**: `/opencv/image/edge`는 `Canny(50,150)`(차선 오프셋과 무관한 시각화용).
+  - **진단 로깅**: 약 15프레임마다 `valid/offset/curvature/pixels` 출력 — `valid=False`인데 `pixels`가 `valid_min_px` 근처면 HSV/threshold 범위 불일치, `pixels=0`이면 ROI 내 검출 색 없음(라인 색/조명/ROI 재확인).
 
 ### 10.1 채택 모델 · 경로 · 클래스 매핑 (확정)
 
@@ -222,8 +234,9 @@ ros2 launch control auto_driving.launch.py
   - **커브 감속(B.2)** — `compute_control`에서 잠정 비활성화(튜닝 후 재도입).
   - **ArUco 동적 장애물(B.4)** — 정지·재출발 상태 머신 미구현(`cv2.aruco` 별도 경로).
   - **회전 교차로(B.5)** — 미구현.
+  - ⚠️ **안정화 순서**: **① 차선 배선 → ② 커브 감속(B.2) 재활성 → ③ `cruise_throttle`(0.13) 순항 신뢰** 순으로 진행. 차선 신호 없이 순항 throttle을 올리면 중립 직진으로 이탈하고, 커브 감속이 꺼진 채 순항하면 급커브에서 이탈한다(9번 원칙 1·2, +30s). 상세는 8.1 잔여 작업의 "안정화 순서".
 
-### 10.2 Vision 학습 파이프라인 (재현용 메모)
+### 10.3 Vision 학습 파이프라인 (재현용 메모)
 
 - **데이터셋 구축**: 대회 제공 4종 동영상 → ffmpeg 프레임 추출 → **makesense.ai**(Object Detection)로 바운딩 박스 라벨링 → YOLO 포맷 export.
   - ⚠️ makesense YOLO export에는 **라벨(`.txt`)만** 포함되고 이미지는 미포함. 이미지는 프레임 추출본을 별도 관리.
@@ -338,6 +351,7 @@ src/
 ├── joystick_msgs/  [ament_cmake]   msg/Joystick.msg
 ├── monitor/        [ament_python]  monitor/monitor_node.py  (+ templates/ static/)
 ├── opencv/         [ament_python]  opencv/opencv_node.py, opencv/lane_detect.py
+│                                    ↳ lane_detect.py: 밴드 무게중심 차선 오프셋(순수 함수). brightness(adaptive threshold)/color(HSV inRange) 이진화, 노드 기본 color·주황 HSV. → /lane/offset [offset,valid,curvature]. 임계값·조명 주의는 본문 10.
 └── topst_utils/    [ament_python]  공용 유틸 (노드 없음)
 ```
 
@@ -432,21 +446,24 @@ joystick_msgs/Joystick.msg
 
 **자율주행 모드 (`auto_driving.launch.py`)** — camera/control/joystick/battery/inference 5노드 + monitor:
 
+> 범례: 실선 `─►` = 현재 launch(5노드)로 활성인 경로. 점선 `╌►` / 점선 박스 `┊…┊` = **launch 미포함**(별도 실행해야 활성). `opencv_node`와 그 `/lane/offset`은 현재 launch에 없어 점선으로 표기 — 이 배선이 없으면 `inference_node` 조향은 중립 유지(8.1 잔여 ①).
+
 ```
                          config/vehicle_config.yaml  (모든 노드가 파라미터로 로드)
                                        │
-   ┌───────────┐  /camera/image/compressed   ┌───────────┐ /opencv/image/{gray,blur,edge}
-   │ camera_node├──────────────┬─────────────►│opencv_node├──────────────┐
-   └───────────┘              │              └───────────┘              │
-                              │                                          ▼
-                              │   (opencv_node 는 launch 미포함 → 8.1  ┌───────────────┐
-                              │    /lane/offset 쓰려면 별도 실행)      │  monitor_node │
-                              │   inference_node: YOLO26n best.onnx   │  (Flask 대시보드)│
-                              ▼   + 주행 정책 (조향/게이팅/분기/정지)   └───────▲───────┘
+   ┌───────────┐  /camera/image/compressed    ┌┈┈┈┈┈┈┈┈┈┈┈┐ /opencv/image/{gray,blur,edge}
+   │ camera_node├──────────────┬───────╌╌╌╌╌╌►┊opencv_node┊╌╌╌╌╌╌╌╌╌╌╌┐
+   └───────────┘              │  (opencv_node └┈┈┈┈┈┈┈┈┈┈┈┘           ┊ (점선=launch 미포함)
+                              │   launch 미포함  ╎ /lane/offset         ▼
+                              │   → 8.1 잔여 ①) ╎ (publish_lane)   ┌───────────────┐
+                              │                 ╎                  │  monitor_node │
+                              │   inference_node: YOLO26n best.onnx │  (Flask 대시보드)│
+                              ▼   + 주행 정책 (조향/게이팅/분기/정지) └───────▲───────┘
                        ┌──────────────┐   /control                        │
                        │inference_node│──────────────┐                    │
                        └──────▲───────┘              ▼                    │
-                    /lane/offset (opencv_node)         │                  │
+                     /lane/offset ╎ (opencv_node,     │                  │
+                       점선=미배선)╌┘                  │                  │
    ┌────────────┐ joystick(Joystick)          ┌────────────┐             │
    │joystick_node├──────────────────┬─────────►│control_node│             │
    └────────────┘                   │          └─────┬──────┘             │
