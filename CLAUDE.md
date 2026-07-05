@@ -126,8 +126,8 @@ ros2 launch control auto_driving.launch.py
   - **순항 throttle** — 출발 후 `cruise_throttle`(0.13) 고정.
 
 **남은 작업:**
-1. **차선 신호 배선(배선 갭)** — `opencv_node`가 `/lane/offset`을 발행할 수 있지만 **`auto_driving.launch.py`에 `opencv_node`가 포함돼 있지 않음**(camera/control/joystick/battery/inference 5노드만 기동). 현재 launch 그대로면 `/lane/offset` 발행자가 없어 조향이 사실상 중립 유지. `opencv_node`를 launch에 추가하거나 별도 실행 필요.
-   - ⚠️ **8.2(토픽 슬래시 불일치)와 맞물리는 리스크**: `opencv_node`를 launch에 추가할 때 `opencv_node`가 발행하는 차선 토픽명(`lane_offset_topic` param 기본값 `/lane/offset`)과 `inference_node`의 `lane_offset_topic` 기본값(`/lane/offset`)이 **양쪽에서 정확히 일치**하는지 반드시 확인할 것. 8.2의 절대/상대(슬래시 有/無) 표기 불일치가 여기서 재발하면 — 예: 한쪽은 `/lane/offset`, 다른 쪽은 `lane/offset`(네임스페이스 상대) — **두 노드는 정상 기동하지만 토픽이 연결되지 않아 조향이 계속 중립 유지**된다. 발행/구독 자체는 에러 없이 뜨므로 원인 파악이 특히 어렵다. config 로드 여부에 따라 토픽명이 바뀔 수 있으니 실제 `ros2 topic list`/`ros2 topic info`로 연결을 확인할 것.
+1. **차선 신호 배선** — ✅ **(2026-07 정정) `opencv_node`는 이미 `auto_driving.launch.py`에 포함**됨(camera/control/joystick/battery/**opencv**/inference). 이 항목의 "opencv_node 미포함" 서술은 낡았으며, 발행측 배선은 완료. **실제 잔여 블로커는 구독측 `inference` 패키지 부재**(src에 없음 → `/lane/offset` 구독자 실재 X, launch의 inference 노드 기동 실패). 상세·프로파일·정규화는 **10번** 참조. ※ 프로파일 기본값은 대회 규정 트랙 `white_track`(brightness/light/split), 연습 트랙은 `lane_profile:=orange_track`.
+   - ⚠️ **8.2(토픽 슬래시 불일치)와 맞물리는 리스크**: `opencv_node`가 발행하는 차선 토픽명(`lane_offset_topic` 기본값 `/lane/offset`)과 (신설될) `inference_node`의 `lane_offset_topic` 기본값(`/lane/offset`)이 **양쪽에서 정확히 일치**해야 함. 8.2의 절대/상대(슬래시 有/無) 표기 불일치가 재발하면 — 예: 한쪽 `/lane/offset`, 다른 쪽 `lane/offset`(네임스페이스 상대) — **두 노드가 정상 기동해도 토픽이 연결되지 않아 조향이 계속 중립 유지**된다. 발행/구독 자체는 에러 없이 떠서 원인 파악이 특히 어렵다. **결론: 절대표기 `/lane/offset`으로 통일**(10번 "토픽명 슬래시 표기 최종 통일안"). `ros2 topic info /lane/offset`로 pub/sub 연결 확인할 것.
 2. **커브 감속(B.2)** — `curve_slow` param과 로직 자리는 있으나 `compute_control`에서 잠정 비활성화(차선 신호 연동·튜닝 후 재도입 예정).
 3. **동적 장애물** — ArUco 마커 정지/재출발 상태 머신(B.4). YOLO가 아니라 별도 OpenCV `cv2.aruco` 경로로 구현. (→ 부록 D) **미구현.**
 4. **회전 교차로(B.5)** — 원형 궤적 추종 + 1바퀴 카운팅 + 탈출 분기. **미구현.**
@@ -183,17 +183,32 @@ ros2 launch control auto_driving.launch.py
   ```
 - 자율주행 launch 명령·인자: `ros2 launch control auto_driving.launch.py` (인자 `model_path` 기본값 = 배포 onnx, 10.1). ※ inference 노드 구현 완료(아래 10.2). 주행 정책은 대부분 구현됨(차선 추종 조향·초록불 게이팅·갈림길 분기·빨간불 정지·순항 throttle) — ArUco 동적 장애물·회전 교차로·커브 감속·차선 배선만 잔여(8.1 TODO).
 - 5종 모니터 토픽 목록: `/camera/image/compressed`, `/opencv/image/{grayscale,blur,edge}`, `/joystick`, `/control`, `/battery_status` (부록 E.4).
-- 토픽명 슬래시 표기 최종 통일안 (8.2 결론): _(미확정 — inference_node는 config의 `IMAGE_TOPIC`/`CONTROL_TOPIC`(둘 다 슬래시 有)을 우선 사용)_
+- 토픽명 슬래시 표기 최종 통일안 (8.2 결론): **차선 토픽은 절대표기 `/lane/offset`으로 통일**(발행자 `opencv_node`의 `lane_offset_topic` 기본값 = `/lane/offset`, 문서상 구독자 `inference_node`의 `lane_offset_topic` 기본값도 `/lane/offset` — 양쪽 이미 일치, 슬래시 有). config의 `IMAGE_TOPIC`/`CONTROL_TOPIC`/`JOYSTICK_TOPIC`/`BATTERY_TOPIC`도 전부 슬래시 有(절대표기)이므로 **절대표기로 통일**을 결론으로 확정. ⚠️ `opencv_node`를 실행할 때 `lane_offset_topic`을 상대표기(`lane/offset`)로 오버라이드하면 네임스페이스가 붙어 구독자와 어긋나므로 절대표기 유지. (그 외 파라미터 기본값 `battery_status`/`joystick` 상대표기는 별개 항목 — config 로드 시 절대표기로 덮임, 8.2)
+- ⚠️ (2026-07 코드 실측 정정) **`opencv_node`는 이미 `auto_driving.launch.py`에 포함**돼 있음(camera/control/joystick/battery/opencv/inference). 8.1 잔여 ①의 "opencv_node launch 미포함"은 낡은 서술 — 배선 자체는 완료.
+- ✅ (2026-07 신설) **`inference` 패키지 골격을 실제로 신설**했다(과거 문서의 "구현·검증 완료" 서술과 달리 이전엔 워크스페이스에 부재했음). 구성: `inference/yolo_onnx.py`(ONNX 래퍼), `inference/inference_node.py`(ROS 배선), **`inference/driving_policy.py`(순수 주행 정책 — ROS/cv2 비의존, 단위 테스트 포함)**. `/camera/image/compressed`+`/lane/offset` → `/control` 경로가 배선됨. **주의(온디바이스 미검증)**: ① `onnxruntime`은 pip(user-site) 설치 필요(10.2), ② 모델 `models/best.onnx` 없으면 노드가 **degraded(정지·중립) 모드**로 기동(예외 안전), ③ 이 개발 박스엔 rclpy/cv2/onnxruntime 부재라 **주행 정책 순수 로직만 단위 테스트 완료**(`test/test_driving_policy.py` 7 PASS), 엔드투엔드는 보드 재검증 필요. 상세는 10.2.
 - 추론 노드 입출력 인터페이스 / `/control` 메시지 타입: **구현 완료(10.2).** 입력 `/camera/image/compressed`(sensor_msgs/CompressedImage), 출력 `/control`(control_msgs/Control: header, steering, throttle). 부록 E.4 참조.
 - 카메라/차선 OpenCV 임계값 (`opencv/lane_detect.py` + `opencv_node.py` 실측):
-  - **검출 방식**: Hough 라인 피팅이 아니라 **밴드 무게중심(band-centroid)** — 하단 ROI를 수평 밴드로 나눠 각 밴드의 차선 픽셀 가로 무게중심으로 오프셋 산출. 두 이진화 경로 지원:
-    - `method='brightness'` — 그레이스케일 + **adaptive threshold**(`ADAPTIVE_THRESH_MEAN_C`, `blockSize=25`, `C=∓10`, 불균일 조명 대응). `polarity`(`light`/`dark`)로 라인이 노면보다 밝은지/어두운지 지정.
-    - `method='color'` — **HSV `inRange`** 색 마스크(주황 라인용 기본 `hsv_lower=[5,80,80]`/`hsv_upper=[22,255,255]`, OpenCV H 0~180). 흰/회색 바닥 위 유색 라인에 강건.
-    - ⚠️ **조명 민감성(코드 주석에 명시)**: `brightness` 경로는 광택 바닥의 반사·주름을 라인으로 오검출한다(실측). 그래서 `opencv_node`의 **`lane_method` 기본값은 `color`**(`lane_detect.py` 함수 기본값은 `brightness`이나 노드가 덮어씀). adaptive threshold를 쓰는 이유도 ROI 전반의 그림자로 한쪽 라인이 통째로 지워지는 것을 막기 위함.
-  - **ROI/밴드 기본값(ROS param 노출)**: `roi_top=50`(vehicle_config의 `ROI_TOP`과 일치), `roi_left=0`, `lane_num_bands=3`, `lane_valid_min_px=40`(밴드별 유효 픽셀 하한). 전처리 blur는 `GaussianBlur(5,5)`.
-  - **`/lane/offset` 산출**: 밴드별 정규화 오프셋을 `weight=num_bands-band_index`(가까운 밴드 가중)로 가중평균 → `offset∈[-1,1]`. `valid`=유효 밴드 1개 이상. `curvature=(먼밴드off - 가까운밴드off)/2` clip `[-1,1]`. 발행 배열은 `[offset, valid, curvature]`.
+  - **두 트랙의 존재(중요)**: 특성이 반대인 두 트랙을 **프로파일**로 보존하며, **기본은 대회 규정 트랙**이다.
+    - **대회 규정 트랙 = `white_track`(기본)**: **검은 바닥 + 양쪽 흰 경계선.** 차량은 좌우 흰 경계선의 중점을 추종. 전략 = `method='brightness'`, `polarity='light'`(어두운 바닥 위 밝은 선), **`split_lanes=True`**.
+    - **연습 트랙 = `orange_track`(대안, 현재 유일 실주행 테스트 가능)**: 회색 바닥 + 주황 라인. `method='color'`, `hsv_lower=[5,80,80]`/`hsv_upper=[22,255,255]`(OpenCV H 0~180, 주황≈H5~22), `polarity='dark'`, `split_lanes=False`.
+  - **검출 방식**: Hough 라인 피팅이 아니라 **밴드 무게중심(band-centroid)** — 하단 ROI를 수평 밴드로 나눠 각 밴드의 차선 픽셀 가로 무게중심으로 오프셋 산출. 두 이진화 경로:
+    - `brightness` — 그레이스케일 + **adaptive threshold**(`ADAPTIVE_THRESH_MEAN_C`, `blockSize=25`, `C=∓10`, 불균일 조명 대응). ROI 전반 그림자로 한쪽 라인이 통째로 지워지는 것을 막기 위해 전역 Otsu 대신 adaptive 사용.
+    - `color` — **HSV `inRange`** 색 마스크. 흰/회색 바닥 위 유색 라인에 강건.
+    - ⚠️ **조명 민감성(코드 주석 명시)**: `brightness` 경로는 광택 바닥의 반사·주름을 라인으로 오검출할 수 있음(실측). 흰 경계선(대회) 트랙은 검은 바닥이라 `brightness/light`가 적합하고, 회색+주황(연습)은 `color`가 강건.
+  - **트랙 프로파일 ROS param(신규)**: `lane_profile`(기본 **`white_track`**, 대안 `orange_track`)이 `method`/`polarity`/`split_lanes` 프리셋을 결정. 개별 param(`lane_method`/`lane_polarity`/`split_lanes`)을 **명시하면 프리셋을 덮어씀(개별 param 우선)**. 미명시 센티널 = `lane_method`/`lane_polarity` 빈 문자열 `''`, `split_lanes` `'auto'`.
+    - `white_track` 프리셋: `method=brightness`, `polarity=light`, `split_lanes=True`.
+    - `orange_track` 프리셋: `method=color`, `polarity=dark`, `split_lanes=False`.
+    - launch 인자로 노출: `ros2 launch control auto_driving.launch.py lane_profile:=orange_track`(연습 트랙 테스트 시). 기본 실행은 `white_track`.
+  - **신규 ROS param·기본값**(전부 `opencv_node`에서 노출·`compute_lane_offset`로 전달):
+    - `roi_right`(기본 `-1`=전폭/원본 오른쪽 끝; 비대칭 ROI 크롭용), `lane_half_norm`(기본 `0.5`), `morph_ksize`(기본 `3`, 형태학적 열림 커널; `<=1` 비활성).
+    - 기존: `roi_top=50`(vehicle_config `ROI_TOP`과 일치), `roi_left=0`, `lane_num_bands=3`, `lane_valid_min_px=40`(밴드별 유효 픽셀 하한), `lane_hsv_lower/upper`(주황 기본), 전처리 blur `GaussianBlur(5,5)`.
+  - **정규화 기준(수정됨)**: 오프셋은 **ROI 중앙이 아니라 원본 이미지 중앙(w/2) 기준**으로 정규화 → `roi_left>0`/`roi_right<w` 비대칭 ROI 에서도 `offset=0`이 카메라 중심선을 뜻함. (`_norm_offset(cx_local, roi_left, img_half)`)
+  - **split 모드 견고성(수정됨)**: `split_lanes=True`는 원본 이미지 중앙을 ROI 로컬로 투영한 고정 분할선으로 좌/우 라인을 나눠 중점을 차선 중앙으로 삼음. **좌/우 각각 per-side 픽셀 게이트**(`side_min_px`, 기본 `valid_min_px/2`)를 통과한 side만 신뢰 — 한쪽 노이즈 몇 px가 phantom 무게중심으로 채택돼 중앙을 끌어당기는 것을 차단. 좌우 모두 통과→중점, 한쪽만→그 라인 ± `lane_half_norm`, 둘 다 미통과→밴드 무효.
+  - **`/lane/offset` 산출**: 밴드별 정규화 오프셋을 `weight=num_bands-band_index`(가까운 밴드 가중)로 가중평균 → `offset∈[-1,1]`. `valid`=유효 밴드 1개 이상. `curvature=(먼밴드off - 가까운밴드off)/2` clip `[-1,1]`. **발행 배열은 `[offset, valid, curvature]` 3원소 유지**(문서화된 인터페이스). `LaneResult.valid_bands`(유효 밴드 수)는 신뢰도 판단용으로 반환·진단 로그 노출되며, inference 신설 시 4번째 원소로 확장 가능.
+  - **실측 대기 항목(코드로 확정 금지, 함수 독스트링에도 명시)**: ① 고정 분할선은 급커브에서 좌/우 경계선이 같은 반쪽에 몰리면 취약 — 적응형 분할은 실차 데이터 확보 후. 현재는 `valid_bands`+한쪽-only 폴백으로 하류가 신뢰도만 낮추게 함. ② `lane_half_norm=0.5`는 "차선 폭 ≈ 이미지 폭의 절반" 가정 — 흰 경계선 트랙 한쪽 소실 구간 조향 정확도를 좌우하므로 실측 튜닝 대상. ③ `_denoise`는 MORPH_OPEN만 수행(라인 메움 아님) — 얇은 먼-밴드 흰 선이 침식돼 곡률 0이 될 수 있어, 흰 선 두께 실측 후 `MORPH_CLOSE` 병행/커널 확정 예정(현재 기본 유지).
   - **Canny 디버그 영상**: `/opencv/image/edge`는 `Canny(50,150)`(차선 오프셋과 무관한 시각화용).
-  - **진단 로깅**: 약 15프레임마다 `valid/offset/curvature/pixels` 출력 — `valid=False`인데 `pixels`가 `valid_min_px` 근처면 HSV/threshold 범위 불일치, `pixels=0`이면 ROI 내 검출 색 없음(라인 색/조명/ROI 재확인).
+  - **진단 로깅**: 약 15프레임마다 `valid/offset/curvature/pixels/valid_bands` + 프로파일·method·split 출력 — `valid=False`인데 `pixels`가 `valid_min_px` 근처면 HSV/threshold 범위 불일치, `pixels=0`이면 ROI 내 검출 색/명암 없음(라인 색/조명/ROI 재확인).
+  - **검증(차량 없이)**: `compute_lane_offset` 순수 함수 합성 이미지 단위 테스트 — (a) 대칭 흰선→offset≈0, (b) 한쪽 흰선→반대쪽 추정, (c) 한쪽 실선+반대쪽 노이즈→per-side 게이트로 왜곡 없음, (d) 곡선→curvature 부호, (e) 비대칭 ROI→offset=0이 원본 이미지 중앙, (f) 회색+주황(orange_track) 회귀. 정규화·게이트·폴백 **산술**은 개발 박스에서 의존성 없이 검증 완료(PASS); cv2 프런트엔드(adaptiveThreshold/inRange/denoise) 포함 엔드투엔드는 numpy/cv2 있는 보드에서 재실행 필요.
 
 ### 10.1 채택 모델 · 경로 · 클래스 매핑 (확정)
 
@@ -215,9 +230,15 @@ ros2 launch control auto_driving.launch.py
   - 레포 루트의 `models/`에 배치(ROS 패키지 밖 → `colcon build`가 매번 복사하지 않음). 검증: 9,806,988 bytes(9.4 MB), producer `pytorch 2.1`.
   - 추론 노드는 이 경로를 하드코딩하지 말고 `model_path` ROS param 기본값으로 주입할 것(9번 원칙 4).
 
-### 10.2 inference 패키지 · 온디바이스 런타임 (구현·검증 완료)
+### 10.2 inference 패키지 · 온디바이스 런타임 (골격 신설 — 온디바이스 검증 대기)
 
-- **런타임(보드 설치 완료, aarch64 / Python 3.10):**
+> **실제 구현 상태(2026-07 갱신)**: 이 절의 아래 "온디바이스 검증 완료" 서술 중 상당수는 이전엔 **문서 선반영(패키지가 실제로 부재)**이었다. 이번에 **패키지 골격을 신설**했다:
+> - 파일: `inference/yolo_onnx.py`(letterbox+ONNX 추론+`(1,300,6)` 파싱, 무거운 import 지연·모델/런타임 부재 시 `RuntimeError`), `inference/inference_node.py`(config 로드→카메라/차선 구독→검출 래치→control timer(기본 20Hz)로 `/control` 발행, 모델 부재 시 **degraded 정지 모드**), **`inference/driving_policy.py`(순수 상태 머신)**, `test/test_driving_policy.py`(7 PASS), 표준 ament_python 빌드 파일.
+> - **launch 정합**: `auto_driving.launch.py`가 넘기는 18개 param을 노드가 전부 declare(총 27개, superset) — 확인 완료.
+> - **검증 범위**: 개발 박스에 rclpy/cv2/onnxruntime 부재 → **순수 주행 정책 로직만 단위 테스트 통과**. ONNX 추론·카메라 디코드·`/control` 발행 엔드투엔드는 **보드에서 재검증 필요**(아래 런타임 설치 후). 모델 `models/best.onnx`가 없으면 노드는 안전하게 정지 모드로 뜬다.
+> - 아래 "런타임/출력 레이아웃/param" 항목은 보드 재현·검증 시의 목표 사양으로 읽을 것.
+
+- **런타임(보드 설치 필요, aarch64 / Python 3.10):**
   - `onnxruntime` 1.23.2 — `CPUExecutionProvider` 사용(GPU/NPU provider 없음).
   - `opencv-python-headless` 5.0.0.93 — GUI 함수 미사용 확인 후 headless 채택(이미지 디코드/전처리 전용).
   - 둘 다 `pip3 install`(user-site). ⚠️ **numpy가 2.2.6으로 상향됨**(onnxruntime 의존). `rclpy`/`cv2`/`onnxruntime` import는 정상 확인. 기존 노드가 `np.float` 등 numpy 1.x 별칭을 쓰면 깨질 수 있으니 camera/opencv/monitor 실행 시 점검.
@@ -346,12 +367,13 @@ src/
 ├── control/        [ament_python]  control/control_node.py
 │   └── launch/{auto_driving,manual_driving}.launch.py
 ├── control_msgs/   [ament_cmake]   msg/Control.msg
-├── inference/      [ament_python]  inference/inference_node.py, inference/yolo_onnx.py
+├── inference/      [ament_python]  inference/inference_node.py, inference/yolo_onnx.py, inference/driving_policy.py
+│                                     ↳ driving_policy.py: 순수 주행 정책(ROS/cv2 비의존) — 출발게이트/빨간불정지/좌우분기(margin)/차선PD+로스트폴백/커브감속. test/test_driving_policy.py.
 ├── joystick/       [ament_python]  joystick/joystick_node.py
 ├── joystick_msgs/  [ament_cmake]   msg/Joystick.msg
 ├── monitor/        [ament_python]  monitor/monitor_node.py  (+ templates/ static/)
 ├── opencv/         [ament_python]  opencv/opencv_node.py, opencv/lane_detect.py
-│                                    ↳ lane_detect.py: 밴드 무게중심 차선 오프셋(순수 함수). brightness(adaptive threshold)/color(HSV inRange) 이진화, 노드 기본 color·주황 HSV. → /lane/offset [offset,valid,curvature]. 임계값·조명 주의는 본문 10.
+│                                    ↳ lane_detect.py: 밴드 무게중심 차선 오프셋(순수 함수, 이미지중앙 정규화·split per-side 게이트). brightness/color 이진화, 노드 기본 프로파일 white_track(brightness/light/split). → /lane/offset [offset,valid,curvature]. 상세는 본문 10.
 └── topst_utils/    [ament_python]  공용 유틸 (노드 없음)
 ```
 

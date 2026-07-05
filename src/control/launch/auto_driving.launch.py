@@ -32,6 +32,10 @@ def generate_launch_description():
     # 바퀴는 안 굴러가고 조향만 차선에 반응한다.
     require_green_start = LaunchConfiguration('require_green_start')
     cruise_throttle = LaunchConfiguration('cruise_throttle')
+    # 차선 트랙 프로파일. 기본은 대회 규정 트랙(검은 바닥+양쪽 흰 경계선):
+    # brightness/light/split_lanes=True. 연습 트랙(회색 바닥+주황 라인)에서
+    # 실주행 테스트할 때만 lane_profile:=orange_track 으로 전환.
+    lane_profile = LaunchConfiguration('lane_profile')
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -48,6 +52,12 @@ def generate_launch_description():
             'cruise_throttle',
             default_value='0.18',
             description='직진 순항 throttle. 조향만 점검하려면 0.0 으로 주면 바퀴가 안 돈다.',
+        ),
+        DeclareLaunchArgument(
+            'lane_profile',
+            default_value='white_track',
+            description=('차선 트랙 프로파일. 기본 white_track(대회: 검은 바닥+흰 '
+                         '경계선, brightness/light/split). 연습 트랙은 orange_track.'),
         ),
         Node(
             package='camera',
@@ -100,12 +110,11 @@ def generate_launch_description():
                     'vehicle_config_file': vehicle_config_path,
                     # 차선 오프셋 발행(/lane/offset) — inference_node 조향 입력.
                     'publish_lane': True,
-                    # 실트랙 프레임 보고 튜닝하는 값들 (트랙 현장 조정 대상).
-                    # 흰 바닥 + 주황 라인 → HSV 색 검출(실측 확인).
-                    'lane_method': 'color',
-                    'lane_hsv_lower': [5, 80, 80],    # 주황 하한 (H,S,V)
-                    'lane_hsv_upper': [22, 255, 255],  # 주황 상한
-                    'lane_polarity': 'dark',    # (brightness 방식 폴백용) 밝은 바닥/어두운 라인
+                    # 트랙 프로파일이 검출 방식(method/polarity/split_lanes)을 결정.
+                    # 기본 white_track(대회). 개별 검출 param 을 명시하면 프리셋을
+                    # 덮어쓴다(opencv_node 참조). 여기선 프로파일에 맡기고,
+                    # 공통 기하(ROI·밴드)만 명시 — 실트랙 튜닝 대상.
+                    'lane_profile': lane_profile,
                     'roi_top': 50,
                     'lane_num_bands': 3,
                     'lane_valid_min_px': 40,
