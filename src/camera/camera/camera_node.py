@@ -1,4 +1,5 @@
 import os
+import re
 from pathlib import Path
 
 import cv2
@@ -17,6 +18,17 @@ def get_default_vehicle_config_path():
     return '/home/topst/D-Racer/src/config/vehicle_config.yaml'
 
 
+# flip_method(문자열) -> cv2.rotate 코드 매핑. 'none'/'' 이면 회전 없음.
+_FLIP_MAP = {
+    'rotate-180': cv2.ROTATE_180,
+    '180': cv2.ROTATE_180,
+    'clockwise': cv2.ROTATE_90_CLOCKWISE,
+    'rotate-90': cv2.ROTATE_90_CLOCKWISE,
+    'counterclockwise': cv2.ROTATE_90_COUNTERCLOCKWISE,
+    'rotate-270': cv2.ROTATE_90_COUNTERCLOCKWISE,
+}
+
+
 class CameraNode(Node):
     def __init__(self):
         super().__init__('camera_node')
@@ -28,7 +40,7 @@ class CameraNode(Node):
         self.declare_parameter('camera_device', '/dev/video0')
         self.declare_parameter('usb_camera_device', '/dev/video1')
         self.declare_parameter('mipi_camera_device', '/dev/video0')
-        self.declare_parameter('flip_method', 'rotate-180')
+        self.declare_parameter('flip_method', 'none')
         self.declare_parameter('jpeg_quality', 90)
         self.declare_parameter('debug_log', True)
 
@@ -65,6 +77,8 @@ class CameraNode(Node):
 
         self.camera_device = camera_device
         self.flip_method = flip_method
+        # 회전 코드 사전 계산. 알 수 없는 값은 회전 없음으로 처리.
+        self.rotate_code = _FLIP_MAP.get(str(flip_method).strip().lower(), None)
 
         # QoS compatible with web_video_server and monitor subscribers.
         self.image_qos = QoSProfile(
@@ -78,7 +92,7 @@ class CameraNode(Node):
         self.pipeline = None
         if not self.open_capture():
             raise RuntimeError(
-                'Failed to open camera with GStreamer pipeline '
+                'Failed to open camera '
                 f'(source={self.camera_source}, device={camera_device}, '
                 f'width={self.image_width}, height={self.image_height})'
             )
@@ -140,49 +154,102 @@ class CameraNode(Node):
 
         return usb_cam, mipi_cam
 
-    def build_candidate_pipelines(self, camera_device, flip_method):
-        if self.usb_cam_enabled:
-            # Many USB webcams expose MJPG by default.
-            mjpg_pipeline = (
-                f"v4l2src device={camera_device} io-mode=2 ! "
-                "image/jpeg,framerate=30/1 ! jpegdec ! "
-                "videoconvert ! videoscale ! "
-                f"video/x-raw,format=BGR,width={self.image_width},height={self.image_height},framerate=30/1 ! "
-                "appsink sync=false drop=true max-buffers=1"
-            )
-            # Fallback for raw USB camera modes.
-            raw_pipeline = (
-                f"v4l2src device={camera_device} io-mode=2 ! "
-                "videoconvert ! videoscale ! "
-                f"video/x-raw,format=BGR,width={self.image_width},height={self.image_height},framerate=30/1 ! "
-                "appsink sync=false drop=true max-buffers=1"
-            )
-            return [mjpg_pipeline, raw_pipeline]
-
-        mipi_pipeline = (
-            f"v4l2src device={camera_device} io-mode=2 ! "
-            f"video/x-raw,format=NV12,width={self.image_width},height={self.image_height},framerate=30/1 ! "
-            f"videoconvert ! videoflip method={flip_method} ! "
-            "video/x-raw,format=BGR ! appsink sync=false drop=true max-buffers=1"
-        )
-        return [mipi_pipeline]
+    @staticmethod
+    def _device_index(device_path):
+        """'/dev/video1' -> 1. 숫자를 못 찾으면 원본 문자열을 그대로 반환."""
+        match = re.search(r'(\d+)\s*$', str(device_path))
+        if match:
+            return int(match.group(1))
+        return device_path
 
     def open_capture(self):
-        if hasattr(self, 'cap') and self.cap is not None:
+        if self.cap is not None:
             self.cap.release()
             self.cap = None
 
-        for candidate_pipeline in self.build_candidate_pipelines(self.camera_device, self.flip_method):
-            cap = cv2.VideoCapture(candidate_pipeline, cv2.CAP_GSTREAMER)
-            if cap.isOpened():
+        if self.usb_cam_enabled:
+            return self._open_usb_v4l2()
+        return self._open_mipi_gstreamer()
+
+    def _open_usb_v4l2(self):
+        """USB 웹캠(C920 등)을 OpenCV V4L2 백엔드로 직접 오픈.
+
+        GStreamer 미포함 OpenCV(GStreamer: NO)에서도 동작한다.
+        MJPG를 우선 시도(USB 대역폭 절감)하고, 실패 시 기본 포맷으로 폴백한다.
+        """
+        index = self._device_index(self.camera_device)
+        # (라벨, FOURCC) 후보. FOURCC=None 이면 카메라 기본 포맷(YUYV 등) 사용.
+        candidates = [('MJPG', 'MJPG'), ('default', None)]
+
+        for label, fourcc in candidates:
+            cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
+            if not cap.isOpened():
+                cap.release()
+                self.get_logger().warning(
+                    f'Failed to open /dev/video{index} via V4L2 (fourcc={label})'
+                )
+                continue
+
+            if fourcc is not None:
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
+            # 설정값으로 요청. 미지원 해상도면 드라이버가 가장 가까운 값으로 맞춘다.
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.image_width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.image_height)
+            cap.set(cv2.CAP_PROP_FPS, self.publish_hz)
+
+            # 실제로 프레임을 읽을 수 있는지 검증.
+            ok, frame = cap.read()
+            if ok and frame is not None:
+                actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 self.cap = cap
-                self.pipeline = candidate_pipeline
-                self.get_logger().info(f'Camera capture opened with pipeline: {candidate_pipeline}')
+                self.pipeline = (
+                    f'V4L2 /dev/video{index} fourcc={label} '
+                    f'capture={actual_w}x{actual_h} -> output={self.image_width}x{self.image_height}'
+                )
+                self.get_logger().info(f'Camera capture opened: {self.pipeline}')
+                if (actual_w, actual_h) != (self.image_width, self.image_height):
+                    self.get_logger().info(
+                        f'Capture size {actual_w}x{actual_h} differs from configured '
+                        f'{self.image_width}x{self.image_height}; frames will be resized.'
+                    )
                 return True
 
             cap.release()
-            self.get_logger().warning(f'Failed to open candidate pipeline: {candidate_pipeline}')
+            self.get_logger().warning(
+                f'Opened /dev/video{index} but could not read a frame (fourcc={label})'
+            )
 
+        self.cap = None
+        self.pipeline = None
+        return False
+
+    def _open_mipi_gstreamer(self):
+        """MIPI 카메라 경로 (GStreamer 파이프라인).
+
+        주의: 이 경로는 cv2.CAP_GSTREAMER 를 사용하므로, OpenCV가 GStreamer 지원
+        없이 빌드된 경우(GStreamer: NO) 열리지 않는다. 현재 차량은 USB 전용이므로
+        이 경로는 사용하지 않는다.
+        """
+        pipeline = (
+            f"v4l2src device={self.camera_device} io-mode=2 ! "
+            f"video/x-raw,format=NV12,width={self.image_width},height={self.image_height},framerate=30/1 ! "
+            f"videoconvert ! videoflip method={self.flip_method} ! "
+            "video/x-raw,format=BGR ! appsink sync=false drop=true max-buffers=1"
+        )
+        cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+        if cap.isOpened():
+            self.cap = cap
+            self.pipeline = pipeline
+            self.get_logger().info(f'Camera capture opened with pipeline: {pipeline}')
+            return True
+
+        cap.release()
+        self.get_logger().warning(
+            'Failed to open MIPI GStreamer pipeline. '
+            'If OpenCV was built with "GStreamer: NO", this path cannot work. '
+            f'pipeline: {pipeline}'
+        )
         self.cap = None
         self.pipeline = None
         return False
@@ -218,6 +285,18 @@ class CameraNode(Node):
             self.get_logger().warning('Failed to read frame')
             return
 
+        # V4L2 직접 오픈에서는 GStreamer videoflip 대신 여기서 회전 적용.
+        if self.usb_cam_enabled and self.rotate_code is not None:
+            frame = cv2.rotate(frame, self.rotate_code)
+
+        # 설정 해상도와 다르면(미지원 해상도로 드라이버가 대체한 경우) 맞춰준다.
+        if frame.shape[1] != self.image_width or frame.shape[0] != self.image_height:
+            frame = cv2.resize(
+                frame,
+                (self.image_width, self.image_height),
+                interpolation=cv2.INTER_AREA,
+            )
+
         success, encoded = cv2.imencode(
             '.jpg',
             frame,
@@ -239,7 +318,7 @@ class CameraNode(Node):
 
     def destroy_node(self):
         try:
-            if hasattr(self, 'cap') and self.cap is not None:
+            if self.cap is not None:
                 self.cap.release()
                 self.cap = None
         finally:

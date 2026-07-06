@@ -38,7 +38,7 @@ class JoystickNode(Node):
         # ROS parameters
         self.declare_parameter('publish_topic', 'joystick')
         self.declare_parameter('publish_hz', 50.0)
-        self.declare_parameter('throttle_scale', 0.12)
+        self.declare_parameter('throttle_scale', 0.16)
         self.declare_parameter('throttle_deadzone', 0.05)
         self.declare_parameter('steering_deadzone', 0.05)
         self.declare_parameter('steering_axis', 'auto')
@@ -354,8 +354,8 @@ class JoystickNode(Node):
             self.clamp(data.analog_stick_left.y),
             self.throttle_deadzone,
         )
+        # clamp keeps throttle within [-1.0, 1.0]; negative = reverse (ESC rev_us).
         throttle = self.clamp(throttle_axis * self.accel_ratio)
-        throttle = max(0.0, throttle)
 
         steering = self.deadzone(
             self.read_steering_axis(data),
