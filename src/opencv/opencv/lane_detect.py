@@ -89,12 +89,22 @@ def _color_mask(roi_bgr, hsv_lower, hsv_upper):
     return cv2.inRange(hsv, lower, upper)
 
 
-def _binarize_lane(gray, polarity):
+def _binarize_lane(gray, polarity, block_size=25):
     """adaptive threshold → 차선 픽셀=255 인 이진 마스크.
 
     (전역 Otsu 가 아니라) adaptive 를 쓰는 이유: ROI 전반의 불균일한 조명·그림자
     때문에 한쪽 차선이 통째로 지워지지 않게 하기 위함.
+
+    block_size 는 지역 평균을 구하는 이웃 창의 픽셀 크기이며 반드시 홀수여야
+    한다(짝수/1 이하면 가장 가까운 유효 홀수로 보정). 이 값은 해상도에 비례해
+    스케일해야 한다 — 이미지가 커지면 같은 물리 영역을 덮기 위해 창도 커져야
+    한다(예: 320×240 에서 25 → 800×600 에서 ≈63).
     """
+    block_size = int(block_size)
+    if block_size < 3:
+        block_size = 3
+    if block_size % 2 == 0:
+        block_size += 1
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
     thresh_type = (cv2.THRESH_BINARY if polarity == POLARITY_LIGHT
                    else cv2.THRESH_BINARY_INV)
@@ -103,7 +113,7 @@ def _binarize_lane(gray, polarity):
         255,
         cv2.ADAPTIVE_THRESH_MEAN_C,
         thresh_type,
-        blockSize=25,
+        blockSize=block_size,
         C=-10 if polarity == POLARITY_LIGHT else 10,
     )
     return mask
@@ -205,6 +215,7 @@ def compute_lane_offset(
     split_lanes=False,
     lane_half_norm=0.5,
     side_min_px=None,
+    block_size=25,
 ):
     """BGR 프레임에서 정규화된 횡방향 차선 오프셋을 추정.
 
@@ -239,7 +250,7 @@ def compute_lane_offset(
         mask = _color_mask(roi, hsv_lower, hsv_upper)
     else:
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        mask = _binarize_lane(gray, polarity)
+        mask = _binarize_lane(gray, polarity, block_size)
 
     mask = _denoise(mask, morph_ksize)
 

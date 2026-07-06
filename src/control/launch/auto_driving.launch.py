@@ -115,10 +115,29 @@ def generate_launch_description():
                     # 덮어쓴다(opencv_node 참조). 여기선 프로파일에 맡기고,
                     # 공통 기하(ROI·밴드)만 명시 — 실트랙 튜닝 대상.
                     'lane_profile': lane_profile,
-                    'roi_top': 50,
-                    'lane_num_bands': 3,
-                    'lane_valid_min_px': 40,
+                    # 아래 픽셀 기준 값들은 발행 해상도 800×600 기준(vehicle_config
+                    # IMAGE_WIDTH/HEIGHT). 320×240 기준값에서 선형 ×2.5, 면적
+                    # ×6.25 로 스케일했다. 해상도 변경 시 함께 재조정할 것.
+                    'roi_top': 125,           # 50 × (600/240) — 하단 ROI 시작 Y
+                    'lane_num_bands': 3,      # 해상도 무관
+                    'lane_valid_min_px': 250,  # 40 × 6.25 — 밴드 유효 픽셀 하한
+                    'morph_ksize': 7,          # 3 × 2.5 — 디노이즈 열림 커널
+                    'lane_block_size': 63,     # 25 × 2.5 — 적응형 임계값 창(홀수)
                     'debug_log': False,
+                },
+            ],
+        ),
+        Node(
+            package='monitor',
+            executable='monitor_node',
+            name='monitor_node',
+            output='screen',
+            parameters=[
+                {
+                    # vehicle_config 에서 IMAGE_TOPIC(/camera/image/compressed),
+                    # WEB_HOST/PORT, 5종 토픽·디스플레이 해상도를 로드. 이로써
+                    # camera_node → monitor_node(Flask 대시보드) 가 연결된다.
+                    'vehicle_config_file': vehicle_config_path,
                 },
             ],
         ),
@@ -142,8 +161,10 @@ def generate_launch_description():
                     'cruise_throttle': ParameterValue(
                         cruise_throttle, value_type=float),  # 직진 순항 (기본 0.2)
                     'corner_throttle': 0.17,   # 코너 감속 throttle
-                    # 코너 판정 곡률 임계(정규화 [-1,1] 스케일). 트랙 curvature 로그로 조정.
-                    'corner_curvature_threshold': 0.30,
+                    # 코너 판정 곡률 임계(정규화 [-1,1] 스케일). 실측 직선 curvature
+                    # 노이즈가 ~0.04 이므로 0.30 은 사실상 발동 안 됨 → 0.12 로 낮춰
+                    # 실제 커브에서 감속되게 함. ctrl 로그의 curv/corner_hold 로 튜닝.
+                    'corner_curvature_threshold': 0.12,
                     # 커브 진입 전 예측 감속 홀드 계수(0~1). 클수록 더 일찍/오래 감속 유지.
                     'curve_hold_decay': 0.85,
                     'turn_throttle': 0.13,     # 갈림길 커밋 중 감속
@@ -153,7 +174,9 @@ def generate_launch_description():
                     'steer_kd': 0.15,          # 미분 게인(떨림 억제)
                     'steer_slew': 0.15,        # 프레임당 최대 조향 변화
                     # --- 갈림길 (트랙 현장 조정 대상) ---
-                    'turn_bias': 0.35,         # 커밋 중 방향 바이어스 크기
+                    'turn_bias': 0.7,          # 커밋 중 방향 바이어스 크기(강하게 꺾음)
+                    'commit_lane_weight': 0.3,  # 커밋 중 차선 PD 비중(0=차선무시,1=평소)
+                    'commit_steer_slew': 0.30,  # 커밋 중 조향 변화 상한(분기 신속완성)
                     'fork_commit_frames': 30,  # 커밋 지속(제어 프레임, 30@20Hz≈1.5s)
                     # --- 속도 (트랙 현장 조정 대상) ---
                     'lane_lost_throttle': 0.10,

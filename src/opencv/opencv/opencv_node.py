@@ -50,6 +50,9 @@ class OpenCvNode(Node):
         self.declare_parameter('lane_half_norm', 0.5)
         # 디노이즈 커널(형태학적 열림). <=1 이면 비활성.
         self.declare_parameter('morph_ksize', 3)
+        # 적응형 임계값 이웃 창(brightness 경로). 해상도에 비례해 스케일할 것
+        # (320×240 → 25, 800×600 → 63). 짝수/1 이하는 내부에서 홀수로 보정.
+        self.declare_parameter('lane_block_size', 25)
 
         subscribe_topic = str(self.get_parameter('subscribe_topic').value)
         self.jpeg_quality = int(self.get_parameter('jpeg_quality').value)
@@ -67,6 +70,7 @@ class OpenCvNode(Node):
         self.lane_hsv_upper = [int(v) for v in self.get_parameter('lane_hsv_upper').value]
         self.lane_half_norm = float(self.get_parameter('lane_half_norm').value)
         self.morph_ksize = int(self.get_parameter('morph_ksize').value)
+        self.lane_block_size = int(self.get_parameter('lane_block_size').value)
 
         # --- 프로파일 프리셋 해석 (개별 param 명시 시 덮어씀) ---
         profiles = {
@@ -197,6 +201,7 @@ class OpenCvNode(Node):
                 morph_ksize=self.morph_ksize,
                 split_lanes=self.split_lanes,
                 lane_half_norm=self.lane_half_norm,
+                block_size=self.lane_block_size,
             )
             # 발행 계약은 [offset, valid, curvature] 3원소 유지(문서화된 인터페이스).
             # valid_bands 는 LaneResult 에 있고 아래 진단 로그로 노출 — inference 가

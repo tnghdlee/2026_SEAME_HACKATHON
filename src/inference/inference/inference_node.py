@@ -65,6 +65,7 @@ class InferenceNode(Node):
         self.declare_parameter('confirm_frames', dp['confirm_frames'])
         self.declare_parameter('stop_confirm_frames', dp['stop_confirm_frames'])
         self.declare_parameter('require_green_start', dp['require_green_start'])
+        self.declare_parameter('green_resumes_from_red', dp['green_resumes_from_red'])
         self.declare_parameter('cruise_throttle', dp['cruise_throttle'])
         self.declare_parameter('corner_throttle', dp['corner_throttle'])
         self.declare_parameter('turn_throttle', dp['turn_throttle'])
@@ -76,6 +77,8 @@ class InferenceNode(Node):
         self.declare_parameter('steer_kd', dp['steer_kd'])
         self.declare_parameter('steer_slew', dp['steer_slew'])
         self.declare_parameter('turn_bias', dp['turn_bias'])
+        self.declare_parameter('commit_lane_weight', dp['commit_lane_weight'])
+        self.declare_parameter('commit_steer_slew', dp['commit_steer_slew'])
         self.declare_parameter('fork_commit_frames', dp['fork_commit_frames'])
         self.declare_parameter('sign_margin', dp['sign_margin'])
         self.declare_parameter('sign_conf', dp['sign_conf'])
@@ -87,6 +90,7 @@ class InferenceNode(Node):
         imgsz = int(self.get_parameter('imgsz').value)
         conf = float(self.get_parameter('conf_threshold').value)
         control_hz = float(self.get_parameter('control_hz').value)
+        self.control_hz = control_hz if control_hz > 0 else 20.0
         lane_topic = str(self.get_parameter('lane_offset_topic').value)
         self.detections_topic = str(self.get_parameter('detections_topic').value)
         self.publish_detections = bool(self.get_parameter('publish_detections').value)
@@ -105,6 +109,8 @@ class InferenceNode(Node):
             'confirm_frames': int(self.get_parameter('confirm_frames').value),
             'stop_confirm_frames': int(self.get_parameter('stop_confirm_frames').value),
             'require_green_start': bool(self.get_parameter('require_green_start').value),
+            'green_resumes_from_red': bool(
+                self.get_parameter('green_resumes_from_red').value),
             'cruise_throttle': float(self.get_parameter('cruise_throttle').value),
             'corner_throttle': float(self.get_parameter('corner_throttle').value),
             'turn_throttle': float(self.get_parameter('turn_throttle').value),
@@ -118,6 +124,8 @@ class InferenceNode(Node):
             'steer_kd': float(self.get_parameter('steer_kd').value),
             'steer_slew': float(self.get_parameter('steer_slew').value),
             'turn_bias': float(self.get_parameter('turn_bias').value),
+            'commit_lane_weight': float(self.get_parameter('commit_lane_weight').value),
+            'commit_steer_slew': float(self.get_parameter('commit_steer_slew').value),
             'fork_commit_frames': int(self.get_parameter('fork_commit_frames').value),
             'sign_margin': float(self.get_parameter('sign_margin').value),
             'sign_conf': float(self.get_parameter('sign_conf').value),
@@ -223,6 +231,19 @@ class InferenceNode(Node):
         out.steering = float(steer)
         out.throttle = float(throttle)
         self.control_pub.publish(out)
+
+        # 진단 로깅 — 약 1초마다(제어 20Hz 기준) 조향/스로틀/래치 상태 출력.
+        # 갈림길에서 turn_intent 가 래치되고 steer 가 실제로 꺾이는지 확인용.
+        self._tick_log = getattr(self, '_tick_log', 0) + 1
+        if self._tick_log >= int(self.control_hz):
+            self._tick_log = 0
+            st = self.policy.state_summary()
+            self.get_logger().info(
+                f'ctrl: steer={steer:+.3f} throttle={throttle:.3f} '
+                f'lane(valid={self.lane.valid} off={self.lane.offset:+.3f} '
+                f'curv={self.lane.curvature:+.3f}) corner_hold={st["corner_hold"]:.3f} '
+                f'turn_intent={st["turn_intent"]} fork_remaining={st["fork_remaining"]} '
+                f'green={st["green_started"]} red={st["red_stopped"]}')
 
 
 def main(args=None):

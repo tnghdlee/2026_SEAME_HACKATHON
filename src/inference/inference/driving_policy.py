@@ -44,6 +44,12 @@ def default_params():
         'stop_confirm_frames': 2,    # 빨간불 정지(B.6)
         # 출발 게이트
         'require_green_start': True,
+        # 초록불 재확정 시 빨간불 하드 정지를 해제할지(정지/재출발 stop-go).
+        # True: 빨간불로 멈춘 뒤 초록불을 다시 확정하면 재출발. 실코스에선 도착
+        #   빨간불 뒤 초록불이 다시 나오지 않으므로 B.6 도착 영구정지와 무해하게
+        #   양립하고, 정지/재출발 테스트도 가능하다.
+        # False: 빨간불 정지를 영구 래치(엄격한 B.6 도착 종료 의미).
+        'green_resumes_from_red': True,
         # throttle
         'cruise_throttle': 0.13,
         'corner_throttle': 0.17,
@@ -59,7 +65,9 @@ def default_params():
         'steer_kd': 0.15,
         'steer_slew': 0.15,
         # 갈림길
-        'turn_bias': 0.35,
+        'turn_bias': 0.5,            # 분기 방향 조향 바이어스(강하게 꺾어야 분기됨)
+        'commit_lane_weight': 0.3,   # 커밋 중 차선 PD 기여 비중(0=차선 무시, 1=평소)
+        'commit_steer_slew': 0.30,   # 커밋 중 조향 변화 상한(평소 steer_slew보다 큼)
         'fork_commit_frames': 30,    # 제어 프레임(30@20Hz≈1.5s)
         'sign_margin': 0.15,
         'sign_conf': 0.35,
@@ -140,7 +148,24 @@ class DrivingPolicy:
         self._green_streak = self._green_streak + 1 if GREENLIGHT in best else 0
         self._red_streak = self._red_streak + 1 if REDLIGHT in best else 0
         if self._green_streak >= p['start_confirm_frames']:
+            # 출발 순간(최초 확정 전이): 조향을 중앙으로 정렬한다. 출발 전에
+            # 잘못 래치된 분기 의도(turn_intent)와 조향 상태를 리셋해, 초록불로
+            # 출발하자마자 스테일 커밋으로 꺾이지 않고 직진/차선중앙에서 시작한다.
+            # 출발 이후 실제로 표지판을 보면 다시 정상적으로 래치된다.
+            if not self.green_started:
+                self.turn_intent = None
+                self.fork_remaining = 0
+                self._left_streak = 0
+                self._right_streak = 0
+                self.last_steer = p['steer_trim']
+                self.last_offset = 0.0
+                self.corner_hold = 0.0
             self.green_started = True
+            # 초록불 재확정 시 빨간불 정지 해제(정지/재출발). 도착 영구정지를
+            # 원하면 green_resumes_from_red=False 로 끈다.
+            if p['green_resumes_from_red']:
+                self.red_stopped = False
+                self._red_streak = 0
         if self._red_streak >= p['stop_confirm_frames']:
             self.red_stopped = True
 
@@ -172,24 +197,39 @@ class DrivingPolicy:
         trim = p['steer_trim']
 
         # --- 조향: 차선 PD (유효 시) 또는 마지막 조향 유지(로스트 폴백) ---
+        # trim 기준 상대량(effort)만 계산해 두고, 커밋 여부에 따라 차선 기여도를
+        # 조절한다. lane_effort = (차선추종 목표 - trim).
         if lane.valid:
             offset = lane.offset
             d_off = offset - self.last_offset
             self.last_offset = offset
-            effort = p['steer_sign'] * (p['steer_kp'] * offset + p['steer_kd'] * d_off)
-            target = trim + effort
+            lane_effort = p['steer_sign'] * (p['steer_kp'] * offset + p['steer_kd'] * d_off)
         else:
-            target = self.last_steer
+            lane_effort = self.last_steer - trim  # 로스트 시 마지막 조향 유지
 
-        # 갈림길 커밋 바이어스(정/역 미러링).
-        committing = self.turn_intent is not None and self.fork_remaining > 0
+        # 갈림길 커밋: 분기 바이어스가 지배하도록 차선 PD 기여를 약화한다.
+        # 갈림길에선 두 갈래가 모두 보여 차선 신호가 애매하므로, 커밋 중에는
+        # 차선 추종을 commit_lane_weight(0~1)로 낮추고 turn_bias 로 분기 방향을
+        # 강하게 밀어야 실제로 꺾인다. (예전엔 PD가 바이어스를 상쇄해 조향이
+        # 안 됐다 — 속도만 줄고 방향 전환 실패.)
+        # 출발 게이트 중(초록불 확정 전)에는 조향이 trim 으로 강제되므로 커밋을
+        # 소진하지 않는다 — 출발 전 표지판이 보여도 fork_remaining 이 낭비되지
+        # 않게 해, 실제 출발 후 갈림길에서 온전한 커밋 창을 쓴다.
+        gated = p['require_green_start'] and not self.green_started
+        committing = (self.turn_intent is not None and self.fork_remaining > 0
+                      and not gated)
         if committing:
             bias_dir = -1.0 if self.turn_intent == 'left' else 1.0
-            target += p['steer_sign'] * p['drive_direction'] * bias_dir * p['turn_bias']
+            bias = p['steer_sign'] * p['drive_direction'] * bias_dir * p['turn_bias']
+            target = trim + p['commit_lane_weight'] * lane_effort + bias
             self.fork_remaining -= 1
+        else:
+            target = trim + lane_effort
 
         target = _clamp(target, -1.0, 1.0)
-        steer = _clamp(_slew(self.last_steer, target, p['steer_slew']), -1.0, 1.0)
+        # 커밋 중엔 분기를 신속히 완성하도록 슬루 상한을 완화(commit_steer_slew).
+        slew_limit = p['commit_steer_slew'] if committing else p['steer_slew']
+        steer = _clamp(_slew(self.last_steer, target, slew_limit), -1.0, 1.0)
 
         # --- 커브 감속 홀드(진입 전/중 감속 유지) ---
         curv = abs(lane.curvature) if lane.valid else 0.0
