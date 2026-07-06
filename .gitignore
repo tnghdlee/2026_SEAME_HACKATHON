@@ -5,4 +5,3 @@ log/
 install/
 __pycache__/
 src/makedb/
-src/inference/
