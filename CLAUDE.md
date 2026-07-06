@@ -6,7 +6,7 @@
 
 본문(0~11)은 작업 가이드이고, **패키지별 상세 레퍼런스**(빌드 타입·실행 노드·의존성·data_files·메시지 필드·토픽 발행/구독 표·데이터 흐름도)는 **부록 E**에 정리되어 있습니다. 특정 패키지·토픽·메시지의 정확한 정의가 필요할 때 부록 E를 참조하세요.
 
-> **최근 진행 사항 (Vision):** YOLO26n 학습 완료 + **`inference` 패키지 신설·빌드·온디바이스 검증까지 완료**되어, 이슈 8.1의 *모델 형식 결정·추론 노드 부재*는 해소되었습니다(YOLO26n/ONNX 통일, `test19.h5` 폐기). `/camera/image/compressed → YOLO26n(ONNX) → /control` 경로가 실제로 동작합니다. **주행 정책도 상당 부분 구현**되었습니다: 차선 추종 조향(PD+슬루+차선로스트 폴백), 출발 초록불 게이팅(B.1), 좌/우 갈림길 분기(B.3, `turn_intent` 래치+margin 게이팅), 도착 빨간불 하드 정지(B.6), 초록불 확정 후 `cruise_throttle`(0.13) 순항까지 `inference_node`에 들어갔습니다. **남은 미완은 ArUco 동적 장애물(B.4)·회전 교차로(B.5)·커브 감속(B.2, param만 있고 코드 비활성)**, 그리고 **차선 신호 배선 갭**(`opencv_node`가 `/lane/offset`을 발행하지만 `auto_driving.launch.py`에 포함돼 있지 않아, 현재 launch 그대로면 조향이 중립 유지)입니다. 상세는 8.1 및 10.2를 참조하세요.
+> **최근 진행 사항 (Vision):** YOLO26n 학습 완료 + **`inference` 패키지 신설·빌드 완료(골격 신설·단위 테스트 통과, 온디바이스 엔드투엔드 검증은 보드에서 재확인 대기)**되어, 이슈 8.1의 *모델 형식 결정·추론 노드 부재*는 해소되었습니다(YOLO26n/ONNX 통일, `test19.h5` 폐기). `/camera/image/compressed → YOLO26n(ONNX) → /control` 경로가 배선돼 있습니다. **주행 정책도 상당 부분 구현**되었습니다: 차선 추종 조향(PD+슬루+차선로스트 폴백), 출발 초록불 게이팅(B.1), 좌/우 갈림길 분기(B.3, `turn_intent` 래치+margin 게이팅), 도착 빨간불 하드 정지(B.6), 초록불 확정 후 `cruise_throttle`(0.13) 순항까지 `inference_node`에 들어갔습니다. **차선 신호 배선은 완료**입니다: `opencv_node`가 `auto_driving.launch.py`에 포함(6노드)되어 `/lane/offset`을 발행하고 `inference_node`가 구독합니다. **남은 미완은 ArUco 동적 장애물(B.4)·회전 교차로(B.5)·커브 감속(B.2, param만 있고 코드 비활성)·온디바이스 엔드투엔드 검증**입니다. 상세는 8.1 및 10.2를 참조하세요.
 
 ---
 
@@ -80,7 +80,7 @@ camera ──► opencv ──┬──► monitor   (영상 전처리 결과 �
 ```
 
 - 카메라 원본 → `opencv` 전처리 → **monitor(시각화)** 와 **자율주행 추론 경로**가 영상 데이터를 **분기(fan-out) 소비**합니다.
-- 자율주행 추론 경로(`inference_node`)의 결과가 `/control`로 발행되어 `control_node`로 들어가 액추에이션됩니다. **추론 노드는 구현·검증 완료입니다(8.1/10.2).** 단 차선 추종 조향은 `opencv_node`의 `/lane/offset` 신호가 필요한데, 이 발행자가 `auto_driving.launch.py`에 아직 포함돼 있지 않습니다(8.1 남은 작업 ①).
+- 자율주행 추론 경로(`inference_node`)의 결과가 `/control`로 발행되어 `control_node`로 들어가 액추에이션됩니다. **추론 노드는 구현 완료(단위 테스트 통과, 온디바이스 엔드투엔드 검증 대기 — 8.1/10.2).** 차선 추종 조향에 필요한 `opencv_node`의 `/lane/offset` 발행자는 `auto_driving.launch.py`에 이미 포함(6노드)되어 있어 배선이 완료되었습니다.
 
 > 노드별 정확한 토픽명·메시지 타입과 자율/수동 모드별 전체 흐름도는 **부록 E.4~E.5**를 참조하세요.
 
@@ -125,14 +125,17 @@ ros2 launch control auto_driving.launch.py
   - **도착 빨간불 하드 정지(B.6)** — 빨간불 확정 시 항상 throttle 0.0으로 덮어씀.
   - **순항 throttle** — 출발 후 `cruise_throttle`(0.13) 고정.
 
-**남은 작업:**
-1. **차선 신호 배선** — ✅ **(2026-07 정정) `opencv_node`는 이미 `auto_driving.launch.py`에 포함**됨(camera/control/joystick/battery/**opencv**/inference). 이 항목의 "opencv_node 미포함" 서술은 낡았으며, 발행측 배선은 완료. **실제 잔여 블로커는 구독측 `inference` 패키지 부재**(src에 없음 → `/lane/offset` 구독자 실재 X, launch의 inference 노드 기동 실패). 상세·프로파일·정규화는 **10번** 참조. ※ 프로파일 기본값은 대회 규정 트랙 `white_track`(brightness/light/split), 연습 트랙은 `lane_profile:=orange_track`.
-   - ⚠️ **8.2(토픽 슬래시 불일치)와 맞물리는 리스크**: `opencv_node`가 발행하는 차선 토픽명(`lane_offset_topic` 기본값 `/lane/offset`)과 (신설될) `inference_node`의 `lane_offset_topic` 기본값(`/lane/offset`)이 **양쪽에서 정확히 일치**해야 함. 8.2의 절대/상대(슬래시 有/無) 표기 불일치가 재발하면 — 예: 한쪽 `/lane/offset`, 다른 쪽 `lane/offset`(네임스페이스 상대) — **두 노드가 정상 기동해도 토픽이 연결되지 않아 조향이 계속 중립 유지**된다. 발행/구독 자체는 에러 없이 떠서 원인 파악이 특히 어렵다. **결론: 절대표기 `/lane/offset`으로 통일**(10번 "토픽명 슬래시 표기 최종 통일안"). `ros2 topic info /lane/offset`로 pub/sub 연결 확인할 것.
-2. **커브 감속(B.2)** — `curve_slow` param과 로직 자리는 있으나 `compute_control`에서 잠정 비활성화(차선 신호 연동·튜닝 후 재도입 예정).
-3. **동적 장애물** — ArUco 마커 정지/재출발 상태 머신(B.4). YOLO가 아니라 별도 OpenCV `cv2.aruco` 경로로 구현. (→ 부록 D) **미구현.**
-4. **회전 교차로(B.5)** — 원형 궤적 추종 + 1바퀴 카운팅 + 탈출 분기. **미구현.**
+**완료된 배선 (과거 TODO → 코드 실측으로 해소):**
+- ✅ **차선 신호 배선 완료** — `opencv_node`가 `auto_driving.launch.py`에 포함(camera/control/joystick/battery/**opencv**/inference **6노드**)되어 `/lane/offset`을 발행하고, **구독측 `inference` 패키지도 신설·존재**(`src/inference/`: `yolo_onnx.py`/`inference_node.py`/`driving_policy.py`)하여 이를 구독한다. 발행·구독 양측 배선이 모두 실재한다. 프로파일 기본값은 대회 규정 트랙 `white_track`(brightness/light/split), 연습 트랙은 `lane_profile:=orange_track`. 상세·프로파일·정규화는 **10번** 참조.
+   - ⚠️ **8.2(토픽 슬래시 불일치)와 맞물리는 검증 포인트**: `opencv_node`가 발행하는 차선 토픽명(`lane_offset_topic` 기본값 `/lane/offset`)과 `inference_node`의 `lane_offset_topic` 기본값(`/lane/offset`)이 **양쪽에서 정확히 일치**해야 함. 8.2의 절대/상대(슬래시 有/無) 표기 불일치가 재발하면 — 예: 한쪽 `/lane/offset`, 다른 쪽 `lane/offset`(네임스페이스 상대) — **두 노드가 정상 기동해도 토픽이 연결되지 않아 조향이 계속 중립 유지**된다. 발행/구독 자체는 에러 없이 떠서 원인 파악이 특히 어렵다. **결론: 절대표기 `/lane/offset`으로 통일**(10번 "토픽명 슬래시 표기 최종 통일안"). 보드 실행 시 `ros2 topic info /lane/offset`로 pub/sub 연결을 확인할 것.
 
-> **안정화 순서(중요)**: 위 잔여 작업은 **① 차선 배선(작업 ①) → ② 커브 감속(B.2) 재활성 → ③ 그 뒤에 `cruise_throttle`(0.13) 순항을 신뢰**하는 순서로 진행할 것. 근거: 차선 신호(`/lane/offset`)가 배선되기 전에는 조향이 중립 유지라 순항 throttle을 올리면 그대로 직진해 차선을 이탈하고, 커브 감속이 꺼진 상태에서 순항 속도를 신뢰하면 급커브에서 이탈한다. 9번 원칙 1·2(완주>속도, 차선 이탈 = +30s)상 이탈 페널티가 순주행 시간보다 크므로, 차선 추종·커브 감속이 검증되기 전까지 순항 속도를 낙관하지 말 것.
+**남은 작업:**
+1. **커브 감속(B.2)** — `curve_slow` param과 로직 자리는 있으나 `compute_control`에서 잠정 비활성화(차선 신호 연동·튜닝 후 재도입 예정).
+2. **동적 장애물** — ArUco 마커 정지/재출발 상태 머신(B.4). YOLO가 아니라 별도 OpenCV `cv2.aruco` 경로로 구현. (→ 부록 D) **미구현.**
+3. **회전 교차로(B.5)** — 원형 궤적 추종 + 1바퀴 카운팅 + 탈출 분기. **미구현.**
+4. **온디바이스 엔드투엔드 검증** — 개발 박스엔 rclpy/cv2/onnxruntime 부재라 주행 정책 순수 로직만 단위 테스트 통과. 보드에서 onnxruntime 설치 후 ONNX 추론·카메라 디코드·`/control` 발행 엔드투엔드 재검증 필요(10.2).
+
+> **안정화 순서(중요)**: 배선은 끝났으니 **① 커브 감속(B.2) 재활성 → ② 그 뒤에 `cruise_throttle`(0.13) 순항을 신뢰**하는 순서로 진행할 것. 근거: 커브 감속이 꺼진 상태에서 순항 속도를 신뢰하면 급커브에서 이탈한다. 9번 원칙 1·2(완주>속도, 차선 이탈 = +30s)상 이탈 페널티가 순주행 시간보다 크므로, 차선 추종·커브 감속이 실차에서 검증되기 전까지 순항 속도를 낙관하지 말 것.
 
 **추론 노드 주의 (검증으로 확정/갱신됨):**
 - ~~NMS-free 출력 순서 Netron 확인 필요~~ → **확인 완료**: 출력 `(1,300,6)`, 6값 = `[x1,y1,x2,y2,score,class_id]`, score 내림차순·NMS-free. 앵커 디코딩·NMS 재적용 금지. (`yolo_onnx.py`에 반영)
@@ -184,7 +187,7 @@ ros2 launch control auto_driving.launch.py
 - 자율주행 launch 명령·인자: `ros2 launch control auto_driving.launch.py` (인자 `model_path` 기본값 = 배포 onnx, 10.1). ※ inference 노드 구현 완료(아래 10.2). 주행 정책은 대부분 구현됨(차선 추종 조향·초록불 게이팅·갈림길 분기·빨간불 정지·순항 throttle) — ArUco 동적 장애물·회전 교차로·커브 감속·차선 배선만 잔여(8.1 TODO).
 - 5종 모니터 토픽 목록: `/camera/image/compressed`, `/opencv/image/{grayscale,blur,edge}`, `/joystick`, `/control`, `/battery_status` (부록 E.4).
 - 토픽명 슬래시 표기 최종 통일안 (8.2 결론): **차선 토픽은 절대표기 `/lane/offset`으로 통일**(발행자 `opencv_node`의 `lane_offset_topic` 기본값 = `/lane/offset`, 문서상 구독자 `inference_node`의 `lane_offset_topic` 기본값도 `/lane/offset` — 양쪽 이미 일치, 슬래시 有). config의 `IMAGE_TOPIC`/`CONTROL_TOPIC`/`JOYSTICK_TOPIC`/`BATTERY_TOPIC`도 전부 슬래시 有(절대표기)이므로 **절대표기로 통일**을 결론으로 확정. ⚠️ `opencv_node`를 실행할 때 `lane_offset_topic`을 상대표기(`lane/offset`)로 오버라이드하면 네임스페이스가 붙어 구독자와 어긋나므로 절대표기 유지. (그 외 파라미터 기본값 `battery_status`/`joystick` 상대표기는 별개 항목 — config 로드 시 절대표기로 덮임, 8.2)
-- ⚠️ (2026-07 코드 실측 정정) **`opencv_node`는 이미 `auto_driving.launch.py`에 포함**돼 있음(camera/control/joystick/battery/opencv/inference). 8.1 잔여 ①의 "opencv_node launch 미포함"은 낡은 서술 — 배선 자체는 완료.
+- ✅ (2026-07 코드 실측 확정) **`opencv_node`는 `auto_driving.launch.py`에 포함**됨(camera/control/joystick/battery/opencv/inference **6노드**). `/lane/offset` 발행측 배선 완료.
 - ✅ (2026-07 신설) **`inference` 패키지 골격을 실제로 신설**했다(과거 문서의 "구현·검증 완료" 서술과 달리 이전엔 워크스페이스에 부재했음). 구성: `inference/yolo_onnx.py`(ONNX 래퍼), `inference/inference_node.py`(ROS 배선), **`inference/driving_policy.py`(순수 주행 정책 — ROS/cv2 비의존, 단위 테스트 포함)**. `/camera/image/compressed`+`/lane/offset` → `/control` 경로가 배선됨. **주의(온디바이스 미검증)**: ① `onnxruntime`은 pip(user-site) 설치 필요(10.2), ② 모델 `models/best.onnx` 없으면 노드가 **degraded(정지·중립) 모드**로 기동(예외 안전), ③ 이 개발 박스엔 rclpy/cv2/onnxruntime 부재라 **주행 정책 순수 로직만 단위 테스트 완료**(`test/test_driving_policy.py` 7 PASS), 엔드투엔드는 보드 재검증 필요. 상세는 10.2.
 - 추론 노드 입출력 인터페이스 / `/control` 메시지 타입: **구현 완료(10.2).** 입력 `/camera/image/compressed`(sensor_msgs/CompressedImage), 출력 `/control`(control_msgs/Control: header, steering, throttle). 부록 E.4 참조.
 - 카메라/차선 OpenCV 임계값 (`opencv/lane_detect.py` + `opencv_node.py` 실측):
@@ -248,14 +251,15 @@ ros2 launch control auto_driving.launch.py
   - `inference/inference_node.py` — 카메라 구독 → 추론 → 시간적 필터(9.5) → 주행 정책(차선 추종 조향 + 출발 게이팅 + 갈림길 분기 + 빨간불 정지) → `/control` 발행. 차선 신호는 `/lane/offset` 구독, 인식 결과 디버그는 `/inference/detections`(JSON) 발행.
   - `setup.cfg` 필수(스크립트를 `lib/inference/`로 설치, `ros2 run` 인식). 누락 시 `bin/`에 설치돼 "No executable found" 발생.
 - **주요 ROS param(기본값):** `model_path`(=배포 onnx), `imgsz=640`, `conf_threshold=0.25`, `confirm_frames=3`(분기류), `stop_confirm_frames=2`(정지류·빨간불 우선), `cruise_throttle=0.13`(**초록불 확정 후 순항 throttle**; 확정 전·빨간불 시 0.0), `drive_direction=1.0`(역방향 트랙 시 -1.0로 좌/우 미러링). 토픽·`STEER_TRIM`은 `vehicle_config.yaml`에서 로드.
-- **엔드투엔드 검증:** 합성 이미지 → cv2 디코드 → ONNX 추론 → `/control` 발행 확인(초록불 미확정 상태라 `steering=0.10`=STEER_TRIM 중립, `throttle=0.0` — 출발 게이트 정상 동작). 초록불 확정 후에는 `cruise_throttle`(0.13)로 순항.
+- **엔드투엔드 검증(보드에서 재확인할 목표 시나리오 — 개발 박스에선 미실행):** 합성 이미지 → cv2 디코드 → ONNX 추론 → `/control` 발행(초록불 미확정 상태라 `steering=STEER_TRIM` 중립, `throttle=0.0` — 출발 게이트 동작 기대). 초록불 확정 후에는 `cruise_throttle`(0.13)로 순항. ※ 개발 박스엔 rclpy/cv2/onnxruntime 부재라 **주행 정책 순수 로직만 단위 테스트 통과**했고, 이 엔드투엔드 경로는 보드에서 재검증 대상.
 - **주행 정책 관련 param(기본값):** `require_green_start=True`(B.1 게이트), `sign_margin=0.15`/`sign_conf=0.35`(좌/우 게이팅 B.3), `steer_kp=0.6`/`steer_kd=0.15`(차선 PD), `steer_sign=1.0`(배선 극성)/`steer_slew=0.15`(슬루), `turn_bias=0.25`(분기 편향), `curve_slow=0.5`(커브 감속 — 현재 비활성), `lane_offset_topic=/lane/offset`.
+- **배선 완료(과거 TODO 해소):** `opencv_node`가 `auto_driving.launch.py`에 포함(6노드)되어 `/lane/offset`을 발행하고 `inference_node`가 구독 — 발행·구독 배선 실재.
 - **미완(8.1 TODO, 코드에 표기):**
-  - **차선 신호 배선** — `opencv_node`가 `/lane/offset`을 발행하나 `auto_driving.launch.py`에 미포함 → launch 그대로면 조향 중립 유지. launch 추가 또는 별도 실행 필요.
   - **커브 감속(B.2)** — `compute_control`에서 잠정 비활성화(튜닝 후 재도입).
   - **ArUco 동적 장애물(B.4)** — 정지·재출발 상태 머신 미구현(`cv2.aruco` 별도 경로).
   - **회전 교차로(B.5)** — 미구현.
-  - ⚠️ **안정화 순서**: **① 차선 배선 → ② 커브 감속(B.2) 재활성 → ③ `cruise_throttle`(0.13) 순항 신뢰** 순으로 진행. 차선 신호 없이 순항 throttle을 올리면 중립 직진으로 이탈하고, 커브 감속이 꺼진 채 순항하면 급커브에서 이탈한다(9번 원칙 1·2, +30s). 상세는 8.1 잔여 작업의 "안정화 순서".
+  - **온디바이스 엔드투엔드 검증** — 보드에서 onnxruntime 설치 후 ONNX 추론·`/control` 발행 재검증 필요.
+  - ⚠️ **안정화 순서**: **① 커브 감속(B.2) 재활성 → ② `cruise_throttle`(0.13) 순항 신뢰** 순으로 진행. 커브 감속이 꺼진 채 순항하면 급커브에서 이탈한다(9번 원칙 1·2, +30s). 상세는 8.1 잔여 작업의 "안정화 순서".
 
 ### 10.3 Vision 학습 파이프라인 (재현용 메모)
 
@@ -377,7 +381,7 @@ src/
 └── topst_utils/    [ament_python]  공용 유틸 (노드 없음)
 ```
 
-> `inference/` 패키지는 신설·빌드 완료되어 `auto_driving.launch.py`가 정상 기동합니다(YOLO26n `best.onnx`는 레포 루트 `models/`에 위치, 10.1). 단 launch는 camera/control/joystick/battery/inference 5노드만 띄우고 `opencv_node`는 포함하지 않습니다(차선 신호 `/lane/offset` 미발행 → 8.1).
+> `inference/` 패키지는 신설·빌드 완료되어 `auto_driving.launch.py`가 정상 기동합니다(YOLO26n `best.onnx`는 레포 루트 `models/`에 위치, 10.1). launch는 camera/control/joystick/battery/**opencv**/inference **6노드**를 띄우며, `opencv_node`가 `/lane/offset`을 발행하고 `inference_node`가 구독합니다(차선 배선 완료 → 8.1).
 
 ## E.2 패키지별 노드 / 빌드 타입 / 설명
 
@@ -466,26 +470,26 @@ joystick_msgs/Joystick.msg
 
 ## E.5 모드별 데이터 흐름도
 
-**자율주행 모드 (`auto_driving.launch.py`)** — camera/control/joystick/battery/inference 5노드 + monitor:
+**자율주행 모드 (`auto_driving.launch.py`)** — camera/control/joystick/battery/opencv/inference 6노드 + monitor:
 
-> 범례: 실선 `─►` = 현재 launch(5노드)로 활성인 경로. 점선 `╌►` / 점선 박스 `┊…┊` = **launch 미포함**(별도 실행해야 활성). `opencv_node`와 그 `/lane/offset`은 현재 launch에 없어 점선으로 표기 — 이 배선이 없으면 `inference_node` 조향은 중립 유지(8.1 잔여 ①).
+> 범례: 실선 `─►` = 현재 launch(6노드)로 활성인 경로. `opencv_node`와 그 `/lane/offset`은 launch에 포함되어 활성이며, `inference_node`가 이를 구독해 조향을 융합한다(8.1 배선 완료).
 
 ```
                          config/vehicle_config.yaml  (모든 노드가 파라미터로 로드)
                                        │
-   ┌───────────┐  /camera/image/compressed    ┌┈┈┈┈┈┈┈┈┈┈┈┐ /opencv/image/{gray,blur,edge}
-   │ camera_node├──────────────┬───────╌╌╌╌╌╌►┊opencv_node┊╌╌╌╌╌╌╌╌╌╌╌┐
-   └───────────┘              │  (opencv_node └┈┈┈┈┈┈┈┈┈┈┈┘           ┊ (점선=launch 미포함)
-                              │   launch 미포함  ╎ /lane/offset         ▼
-                              │   → 8.1 잔여 ①) ╎ (publish_lane)   ┌───────────────┐
-                              │                 ╎                  │  monitor_node │
+   ┌───────────┐  /camera/image/compressed    ┌───────────┐ /opencv/image/{gray,blur,edge}
+   │ camera_node├──────────────┬─────────────►│opencv_node├───────────┐
+   └───────────┘              │               └───────────┘           │
+                              │                 │ /lane/offset         ▼
+                              │                 │ (publish_lane)   ┌───────────────┐
+                              │                 │                  │  monitor_node │
                               │   inference_node: YOLO26n best.onnx │  (Flask 대시보드)│
                               ▼   + 주행 정책 (조향/게이팅/분기/정지) └───────▲───────┘
                        ┌──────────────┐   /control                        │
                        │inference_node│──────────────┐                    │
                        └──────▲───────┘              ▼                    │
-                     /lane/offset ╎ (opencv_node,     │                  │
-                       점선=미배선)╌┘                  │                  │
+                     /lane/offset │ (opencv_node)     │                  │
+                                  └──────────────────┘                   │
    ┌────────────┐ joystick(Joystick)          ┌────────────┐             │
    │joystick_node├──────────────────┬─────────►│control_node│             │
    └────────────┘                   │          └─────┬──────┘             │
