@@ -6,13 +6,13 @@
 
 본문(0~11)은 작업 가이드이고, **패키지별 상세 레퍼런스**(빌드 타입·실행 노드·의존성·data_files·메시지 필드·토픽 발행/구독 표·데이터 흐름도)는 **부록 E**에 정리되어 있습니다. 특정 패키지·토픽·메시지의 정확한 정의가 필요할 때 부록 E를 참조하세요.
 
-> **최근 진행 사항 (Vision):** YOLO26n 학습 완료 + **`inference` 패키지 신설·빌드 완료(골격 신설·단위 테스트 통과, 온디바이스 엔드투엔드 검증은 보드에서 재확인 대기)**되어, 이슈 8.1의 *모델 형식 결정·추론 노드 부재*는 해소되었습니다(YOLO26n/ONNX 통일, `test19.h5` 폐기). `/camera/image/compressed → YOLO26n(ONNX) → /control` 경로가 배선돼 있습니다. **주행 정책도 상당 부분 구현**되었습니다: 차선 추종 조향(PD+슬루+차선로스트 폴백), 출발 초록불 게이팅(B.1), 좌/우 갈림길 분기(B.3, `turn_intent` 래치+margin 게이팅), 도착 빨간불 하드 정지(B.6), 초록불 확정 후 `cruise_throttle`(0.13) 순항까지 `inference_node`에 들어갔습니다. **차선 신호 배선은 완료**입니다: `opencv_node`가 `auto_driving.launch.py`에 포함(6노드)되어 `/lane/offset`을 발행하고 `inference_node`가 구독합니다. **남은 미완은 ArUco 동적 장애물(B.4)·회전 교차로(B.5)·커브 감속(B.2, param만 있고 코드 비활성)·온디바이스 엔드투엔드 검증**입니다. 상세는 8.1 및 10.2를 참조하세요.
+> **최근 진행 사항 (Vision):** YOLO26n 학습 완료 + **`inference` 패키지 신설·빌드 완료(골격 신설·단위 테스트 통과, 온디바이스 엔드투엔드 검증은 보드에서 재확인 대기)**되어, 이슈 8.1의 *모델 형식 결정·추론 노드 부재*는 해소되었습니다(YOLO26n/ONNX 통일, `test19.h5` 폐기). `/camera/image/compressed → YOLO26n(ONNX) → /control` 경로가 배선돼 있습니다. **주행 정책도 상당 부분 구현**되었습니다: 차선 추종 조향(PD+슬루+차선로스트 폴백), 출발 초록불 게이팅(B.1), 좌/우 갈림길 분기(B.3, `turn_intent` 래치+margin 게이팅), 도착 빨간불 하드 정지(B.6), 초록불 확정 후 `cruise_throttle`(0.13) 순항까지 `inference_node`에 들어갔습니다. **차선 신호 배선은 완료**입니다: `opencv_node`가 `auto_driving.launch.py`에 포함(6노드)되어 `/lane/offset`을 발행하고 `inference_node`가 구독합니다. 커브 감속(B.2)도 코드상 활성입니다: throttle 감속(`corner_hold→corner_throttle`)에 더해 곡률 피드포워드 조향(`curve_ff`, `sim_line_260707_fix.py`에서 이식)까지 들어가 있어 **실차 튜닝만 남았습니다**. **남은 미완은 ArUco 동적 장애물(B.4)·회전 교차로(B.5)·온디바이스 엔드투엔드 검증**입니다. 상세는 8.1 및 10.2를 참조하세요.
 
 ---
 
 ## 0. 가장 먼저 알아야 할 것 (Quick Start for Claude Code)
 
-1. **자율주행 "인식"에 더해 "주행 정책"도 대부분 구현됐습니다.** `inference` 패키지가 `/control` 발행자로 동작하며(YOLO26n/ONNX), 차선 추종 조향·출발 초록불 게이팅·좌/우 갈림길 분기·도착 빨간불 정지·순항 throttle(0.13)이 들어가 있습니다. 남은 핵심 작업은 **① 차선 신호 배선**(`opencv_node`를 `auto_driving.launch.py`에 추가하거나 별도 실행 — 없으면 `/lane/offset` 미발행으로 조향이 중립 유지)**, ② 커브 감속 재활성(B.2), ③ ArUco 동적 장애물 정지/재출발(B.4), ④ 회전 교차로(B.5)**입니다. → 8.1 / 10.2 참조.
+1. **자율주행 "인식"에 더해 "주행 정책"도 대부분 구현됐습니다.** `inference` 패키지가 `/control` 발행자로 동작하며(YOLO26n/ONNX), 차선 추종 조향·출발 초록불 게이팅·좌/우 갈림길 분기·도착 빨간불 정지·순항 throttle(0.13)이 들어가 있습니다. 차선 신호 배선(`opencv_node`→`/lane/offset`→`inference_node`)과 커브 감속(B.2, throttle 감속 + `curve_ff` 예측 조향) 모두 코드상 완료·활성입니다. 남은 핵심 작업은 **① ArUco 동적 장애물 정지/재출발(B.4), ② 회전 교차로(B.5), ③ 실차 튜닝·온디바이스 엔드투엔드 검증(커브 감속·`curve_ff` 포함)**입니다. → 8.1 / 10.2 참조.
 2. **빌드 순서가 정해져 있습니다.** 메시지 패키지가 단방향 의존을 가지므로 인터페이스 계층을 먼저 빌드해야 합니다. → 6번 참조.
 3. **토픽명 슬래시(`/`) 불일치 가능성**이 있습니다. 파라미터 기본값과 `vehicle_config.yaml`이 다릅니다. 토픽 관련 작업 시 반드시 확인하세요. → 8.2 참조.
 4. **완주 안정성 > 속도.** Lab-Time 페널티(대부분 +30s)가 순주행 시간보다 큰 경우가 많습니다. → 9번 설계 원칙 참조.
@@ -130,12 +130,13 @@ ros2 launch control auto_driving.launch.py
    - ⚠️ **8.2(토픽 슬래시 불일치)와 맞물리는 검증 포인트**: `opencv_node`가 발행하는 차선 토픽명(`lane_offset_topic` 기본값 `/lane/offset`)과 `inference_node`의 `lane_offset_topic` 기본값(`/lane/offset`)이 **양쪽에서 정확히 일치**해야 함. 8.2의 절대/상대(슬래시 有/無) 표기 불일치가 재발하면 — 예: 한쪽 `/lane/offset`, 다른 쪽 `lane/offset`(네임스페이스 상대) — **두 노드가 정상 기동해도 토픽이 연결되지 않아 조향이 계속 중립 유지**된다. 발행/구독 자체는 에러 없이 떠서 원인 파악이 특히 어렵다. **결론: 절대표기 `/lane/offset`으로 통일**(10번 "토픽명 슬래시 표기 최종 통일안"). 보드 실행 시 `ros2 topic info /lane/offset`로 pub/sub 연결을 확인할 것.
 
 **남은 작업:**
-1. **커브 감속(B.2)** — `curve_slow` param과 로직 자리는 있으나 `compute_control`에서 잠정 비활성화(차선 신호 연동·튜닝 후 재도입 예정).
-2. **동적 장애물** — ArUco 마커 정지/재출발 상태 머신(B.4). YOLO가 아니라 별도 OpenCV `cv2.aruco` 경로로 구현. (→ 부록 D) **미구현.**
-3. **회전 교차로(B.5)** — 원형 궤적 추종 + 1바퀴 카운팅 + 탈출 분기. **미구현.**
-4. **온디바이스 엔드투엔드 검증** — 개발 박스엔 rclpy/cv2/onnxruntime 부재라 주행 정책 순수 로직만 단위 테스트 통과. 보드에서 onnxruntime 설치 후 ONNX 추론·카메라 디코드·`/control` 발행 엔드투엔드 재검증 필요(10.2).
+1. **동적 장애물** — ArUco 마커 정지/재출발 상태 머신(B.4). YOLO가 아니라 별도 OpenCV `cv2.aruco` 경로로 구현. (→ 부록 D) **미구현.**
+2. **회전 교차로(B.5)** — 원형 궤적 추종 + 1바퀴 카운팅 + 탈출 분기. **미구현.**
+3. **온디바이스 엔드투엔드 검증** — 개발 박스엔 rclpy/cv2/onnxruntime 부재라 주행 정책 순수 로직만 단위 테스트 통과. 보드에서 onnxruntime 설치 후 ONNX 추론·카메라 디코드·`/control` 발행 엔드투엔드 재검증 필요(10.2).
 
-> **안정화 순서(중요)**: 배선은 끝났으니 **① 커브 감속(B.2) 재활성 → ② 그 뒤에 `cruise_throttle`(0.13) 순항을 신뢰**하는 순서로 진행할 것. 근거: 커브 감속이 꺼진 상태에서 순항 속도를 신뢰하면 급커브에서 이탈한다. 9번 원칙 1·2(완주>속도, 차선 이탈 = +30s)상 이탈 페널티가 순주행 시간보다 크므로, 차선 추종·커브 감속이 실차에서 검증되기 전까지 순항 속도를 낙관하지 말 것.
+> **커브 감속(B.2) 상태 정정(2026-07)**: 과거 문서는 "커브 감속이 `curve_slow` param만 있고 코드 비활성"이라 서술했으나 **코드 실측 결과 이는 사실이 아니다.** `driving_policy.py::step()`은 `corner_hold`(=`|curvature|`의 감쇠 최댓값)가 `corner_curvature_threshold`(launch 기본 0.12) 이상이면 throttle 을 `corner_throttle`(0.17)로 낮추는 **커브 감속이 이미 활성**이다(옛 설계 이름 `curve_slow` 는 코드에 존재하지 않음). 추가로 `sim_line_260707_fix.py` 에서 **곡률 피드포워드 조향 `curve_ff`(기본 0.30)** 를 이식해, 다가오는 커브 곡률에 비례해 앞바퀴를 미리 꺾는다(`step()`의 `lane_effort` 에 `steer_sign*curve_ff*curvature` 항). 즉 B.2 커브 대응은 **감속(throttle) + 예측 조향(steering) 양쪽 다 활성**이며, 남은 것은 실차 튜닝뿐이다.
+
+> **안정화 순서(중요)**: 배선·커브 감속·피드포워드는 코드상 활성이므로 남은 것은 **실차 검증**이다. **① 커브 감속·`curve_ff` 를 실트랙에서 검증(ctrl 로그의 `curv`/`corner_hold` 관찰) → ② 그 뒤에 `cruise_throttle`(0.13) 순항을 신뢰**하는 순서로 진행할 것. 근거: 커브 대응이 실차에서 검증되기 전 순항 속도를 낙관하면 급커브에서 이탈한다. 9번 원칙 1·2(완주>속도, 차선 이탈 = +30s)상 이탈 페널티가 순주행 시간보다 크다. 오프라인 튜닝은 `tools/lane_tuning_harness.py`(실제 `compute_lane_offset`+`DrivingPolicy` 호출, 파라미터가 ROS param 과 1:1)로 캡처 프레임에 대해 선행 가능.
 
 **추론 노드 주의 (검증으로 확정/갱신됨):**
 - ~~NMS-free 출력 순서 Netron 확인 필요~~ → **확인 완료**: 출력 `(1,300,6)`, 6값 = `[x1,y1,x2,y2,score,class_id]`, score 내림차순·NMS-free. 앵커 디코딩·NMS 재적용 금지. (`yolo_onnx.py`에 반영)
@@ -184,7 +185,7 @@ ros2 launch control auto_driving.launch.py
   colcon build              # 나머지 기능 패키지 (inference 포함)
   source install/setup.bash
   ```
-- 자율주행 launch 명령·인자: `ros2 launch control auto_driving.launch.py` (인자 `model_path` 기본값 = 배포 onnx, 10.1). ※ inference 노드 구현 완료(아래 10.2). 주행 정책은 대부분 구현됨(차선 추종 조향·초록불 게이팅·갈림길 분기·빨간불 정지·순항 throttle) — ArUco 동적 장애물·회전 교차로·커브 감속·차선 배선만 잔여(8.1 TODO).
+- 자율주행 launch 명령·인자: `ros2 launch control auto_driving.launch.py` (인자 `model_path` 기본값 = 배포 onnx, 10.1). ※ inference 노드 구현 완료(아래 10.2). 주행 정책은 대부분 구현됨(차선 추종 조향·초록불 게이팅·갈림길 분기·빨간불 정지·순항 throttle·커브 감속(throttle)·`curve_ff` 예측 조향·차선 배선) — ArUco 동적 장애물·회전 교차로·실차 튜닝·온디바이스 검증만 잔여(8.1 TODO).
 - 5종 모니터 토픽 목록: `/camera/image/compressed`, `/opencv/image/{grayscale,blur,edge}`, `/joystick`, `/control`, `/battery_status` (부록 E.4).
 - 토픽명 슬래시 표기 최종 통일안 (8.2 결론): **차선 토픽은 절대표기 `/lane/offset`으로 통일**(발행자 `opencv_node`의 `lane_offset_topic` 기본값 = `/lane/offset`, 문서상 구독자 `inference_node`의 `lane_offset_topic` 기본값도 `/lane/offset` — 양쪽 이미 일치, 슬래시 有). config의 `IMAGE_TOPIC`/`CONTROL_TOPIC`/`JOYSTICK_TOPIC`/`BATTERY_TOPIC`도 전부 슬래시 有(절대표기)이므로 **절대표기로 통일**을 결론으로 확정. ⚠️ `opencv_node`를 실행할 때 `lane_offset_topic`을 상대표기(`lane/offset`)로 오버라이드하면 네임스페이스가 붙어 구독자와 어긋나므로 절대표기 유지. (그 외 파라미터 기본값 `battery_status`/`joystick` 상대표기는 별개 항목 — config 로드 시 절대표기로 덮임, 8.2)
 - ✅ (2026-07 코드 실측 확정) **`opencv_node`는 `auto_driving.launch.py`에 포함**됨(camera/control/joystick/battery/opencv/inference **6노드**). `/lane/offset` 발행측 배선 완료.
@@ -252,14 +253,14 @@ ros2 launch control auto_driving.launch.py
   - `setup.cfg` 필수(스크립트를 `lib/inference/`로 설치, `ros2 run` 인식). 누락 시 `bin/`에 설치돼 "No executable found" 발생.
 - **주요 ROS param(기본값):** `model_path`(=배포 onnx), `imgsz=640`, `conf_threshold=0.25`, `confirm_frames=3`(분기류), `stop_confirm_frames=2`(정지류·빨간불 우선), `cruise_throttle=0.13`(**초록불 확정 후 순항 throttle**; 확정 전·빨간불 시 0.0), `drive_direction=1.0`(역방향 트랙 시 -1.0로 좌/우 미러링). 토픽·`STEER_TRIM`은 `vehicle_config.yaml`에서 로드.
 - **엔드투엔드 검증(보드에서 재확인할 목표 시나리오 — 개발 박스에선 미실행):** 합성 이미지 → cv2 디코드 → ONNX 추론 → `/control` 발행(초록불 미확정 상태라 `steering=STEER_TRIM` 중립, `throttle=0.0` — 출발 게이트 동작 기대). 초록불 확정 후에는 `cruise_throttle`(0.13)로 순항. ※ 개발 박스엔 rclpy/cv2/onnxruntime 부재라 **주행 정책 순수 로직만 단위 테스트 통과**했고, 이 엔드투엔드 경로는 보드에서 재검증 대상.
-- **주행 정책 관련 param(기본값):** `require_green_start=True`(B.1 게이트), `sign_margin=0.15`/`sign_conf=0.35`(좌/우 게이팅 B.3), `steer_kp=0.6`/`steer_kd=0.15`(차선 PD), `steer_sign=1.0`(배선 극성)/`steer_slew=0.15`(슬루), `turn_bias=0.25`(분기 편향), `curve_slow=0.5`(커브 감속 — 현재 비활성), `lane_offset_topic=/lane/offset`.
+- **주행 정책 관련 param(기본값):** `require_green_start=True`(B.1 게이트), `sign_margin=0.15`/`sign_conf=0.35`(좌/우 게이팅 B.3), `steer_kp=0.6`/`steer_kd=0.15`(차선 PD), `curve_ff=0.30`(**곡률 피드포워드 조향** — 다가오는 커브를 미리 꺾음, `sim_line_260707_fix.py`서 이식), `steer_sign=-1.0`(배선 극성; launch 값)/`steer_slew=0.15`(슬루), `turn_bias=0.7`(분기 편향; launch 값), `corner_throttle=0.17`/`corner_curvature_threshold=0.12`/`curve_hold_decay=0.85`(**커브 감속 활성** — `corner_hold`가 임계 이상이면 throttle을 corner_throttle로 낮춤), `lane_offset_topic=/lane/offset`. ※ 옛 문서의 `curve_slow` param 은 코드에 존재하지 않음(위 corner_* 메커니즘이 그 역할).
 - **배선 완료(과거 TODO 해소):** `opencv_node`가 `auto_driving.launch.py`에 포함(6노드)되어 `/lane/offset`을 발행하고 `inference_node`가 구독 — 발행·구독 배선 실재.
+- **커브 감속(B.2) — 활성(정정):** `step()`이 `corner_hold`(=`|curvature|` 감쇠 최댓값)≥`corner_curvature_threshold`(0.12)면 throttle을 `corner_throttle`(0.17)로 낮춘다. 추가로 `curve_ff`(0.30) 곡률 피드포워드 조향까지 활성. 옛 문서의 "compute_control 비활성"·`curve_slow` 서술은 코드와 불일치였고 정정함. 남은 것은 실차 튜닝.
 - **미완(8.1 TODO, 코드에 표기):**
-  - **커브 감속(B.2)** — `compute_control`에서 잠정 비활성화(튜닝 후 재도입).
   - **ArUco 동적 장애물(B.4)** — 정지·재출발 상태 머신 미구현(`cv2.aruco` 별도 경로).
   - **회전 교차로(B.5)** — 미구현.
   - **온디바이스 엔드투엔드 검증** — 보드에서 onnxruntime 설치 후 ONNX 추론·`/control` 발행 재검증 필요.
-  - ⚠️ **안정화 순서**: **① 커브 감속(B.2) 재활성 → ② `cruise_throttle`(0.13) 순항 신뢰** 순으로 진행. 커브 감속이 꺼진 채 순항하면 급커브에서 이탈한다(9번 원칙 1·2, +30s). 상세는 8.1 잔여 작업의 "안정화 순서".
+  - ⚠️ **안정화 순서**: 커브 감속·`curve_ff`는 코드상 활성이므로 **① 실트랙에서 커브 대응 검증(ctrl 로그 `curv`/`corner_hold`) → ② `cruise_throttle`(0.13) 순항 신뢰** 순. 오프라인 선(先)튜닝은 `tools/lane_tuning_harness.py`. 상세는 8.1 잔여 작업의 "안정화 순서".
 
 ### 10.3 Vision 학습 파이프라인 (재현용 메모)
 

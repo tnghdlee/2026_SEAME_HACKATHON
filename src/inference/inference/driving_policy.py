@@ -63,6 +63,12 @@ def default_params():
         'steer_sign': -1.0,
         'steer_kp': 0.6,
         'steer_kd': 0.15,
+        # 곡률 피드포워드(sim_line_260707_fix.py 에서 이식): 다가오는 커브의
+        # 곡률에 비례해 조향을 '미리' 꺾어 커브 진입 이탈을 줄인다. offset PD 와
+        # 같은 프레임(차선 기하)에서 나온 값이라 steer_sign 만 적용하고
+        # drive_direction 미러링은 하지 않는다(turn_bias 와 다름). 직선 곡률
+        # 노이즈(~0.04)엔 사실상 무영향, 실제 커브에서만 유효. 실차 튜닝 대상.
+        'curve_ff': 0.30,
         'steer_slew': 0.15,
         # 갈림길
         'turn_bias': 0.5,            # 분기 방향 조향 바이어스(강하게 꺾어야 분기됨)
@@ -203,7 +209,13 @@ class DrivingPolicy:
             offset = lane.offset
             d_off = offset - self.last_offset
             self.last_offset = offset
-            lane_effort = p['steer_sign'] * (p['steer_kp'] * offset + p['steer_kd'] * d_off)
+            # PD(현재 오차) + 곡률 피드포워드(다가오는 커브 예측). curvature 는
+            # offset 과 같은 부호 규약(먼 밴드가 오른쪽으로 휘면 +)이라 steer_sign
+            # 만 곱한다 — drive_direction 미러링 대상 아님(offset PD 와 동일).
+            lane_effort = p['steer_sign'] * (
+                p['steer_kp'] * offset
+                + p['steer_kd'] * d_off
+                + p['curve_ff'] * lane.curvature)
         else:
             lane_effort = self.last_steer - trim  # 로스트 시 마지막 조향 유지
 

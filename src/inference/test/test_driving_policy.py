@@ -104,6 +104,23 @@ def test_curve_slowdown():
     assert t_curve == 0.1, '커브 감속(corner_throttle)'
 
 
+def test_curve_feedforward():
+    # 곡률 피드포워드: offset=0(중앙 정렬)이라도 다가오는 커브 곡률에 맞춰 미리 조향.
+    base = {'require_green_start': False, 'steer_sign': 1.0, 'steer_kp': 0.6,
+            'steer_kd': 0.0, 'steer_slew': 1.0}
+    p_off = DrivingPolicy(dict(base, curve_ff=0.0))
+    p_ff = DrivingPolicy(dict(base, curve_ff=0.5))
+    # offset=0, curvature>0(앞쪽이 오른쪽으로 휨).
+    s_off, _ = p_off.step(straight(valid=True, offset=0.0, curv=0.4))
+    s_ff, _ = p_ff.step(straight(valid=True, offset=0.0, curv=0.4))
+    assert abs(s_off) < 1e-6, 'curve_ff=0 이면 곡률 무시(offset=0 → 조향 0)'
+    assert s_ff > 0.0, 'curve_ff>0 이면 다가오는 우커브로 미리 조향'
+    # 좌커브(curvature<0)면 반대 부호.
+    p_ff2 = DrivingPolicy(dict(base, curve_ff=0.5))
+    s_ff2, _ = p_ff2.step(straight(valid=True, offset=0.0, curv=-0.4))
+    assert s_ff2 < 0.0, 'curve_ff>0 + 좌커브 → 좌조향'
+
+
 def _run_all():
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     for fn in fns:

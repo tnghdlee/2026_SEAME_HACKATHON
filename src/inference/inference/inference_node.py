@@ -75,6 +75,7 @@ class InferenceNode(Node):
         self.declare_parameter('steer_sign', dp['steer_sign'])
         self.declare_parameter('steer_kp', dp['steer_kp'])
         self.declare_parameter('steer_kd', dp['steer_kd'])
+        self.declare_parameter('curve_ff', dp['curve_ff'])
         self.declare_parameter('steer_slew', dp['steer_slew'])
         self.declare_parameter('turn_bias', dp['turn_bias'])
         self.declare_parameter('commit_lane_weight', dp['commit_lane_weight'])
@@ -122,6 +123,7 @@ class InferenceNode(Node):
             'steer_sign': float(self.get_parameter('steer_sign').value),
             'steer_kp': float(self.get_parameter('steer_kp').value),
             'steer_kd': float(self.get_parameter('steer_kd').value),
+            'curve_ff': float(self.get_parameter('curve_ff').value),
             'steer_slew': float(self.get_parameter('steer_slew').value),
             'turn_bias': float(self.get_parameter('turn_bias').value),
             'commit_lane_weight': float(self.get_parameter('commit_lane_weight').value),
