@@ -69,7 +69,7 @@ class ArucoStopPolicy:
             if self._present_streak >= self.cfg.stop_confirm_frames:
                 self.state = self.STOP
         else:  # STOP
-            # 재출발은 소멸을 확실히 확인한 뒤에만
+            # 재출발은 소멸을 확실히 확인한 뒤 고고
             if self._absent_streak >= self.cfg.clear_confirm_frames:
                 self.state = self.RUN
 
