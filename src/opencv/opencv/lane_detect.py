@@ -1,51 +1,51 @@
-"""규칙 기반 차선 오프셋 추정 (CLAUDE.md 8.1 TODO — 차선 추종).
+"""규칙 기반 차선 오프셋 추정 (CLAUDE.md 8.1 — 차선 추종), Hough 라인 방식.
 
-설계 (inference_node.compute_control 의 설계 주석 참조):
-    Hough 2-라인 피팅은 점선·그림자·급커브에서 쉽게 깨집니다. 완주 우선
-    해커톤에서는 대신 *밴드 무게중심(band-centroid)* 방식을 씁니다: 하단 ROI를
-    몇 개의 수평 밴드로 나누고, 각 밴드에서 차선 픽셀을 이진화한 뒤 차선 질량의
-    가로 무게중심을 구합니다. 그 무게중심이 이미지 중앙에서 얼마나 벗어났는지가
-    횡오차이며, 가까운 밴드와 먼 밴드를 비교하면 값싼 곡률(피드포워드) 추정치를
-    얻습니다.
+설계:
+    이 모듈은 하단 ROI 에서 차선 마킹을 이진화한 뒤 *확률적 허프 변환*
+    (`cv2.HoughLinesP`)으로 직선 세그먼트를 뽑아 좌/우 차선을 피팅한다.
+    각 라인을 x = f(y) (거의 수직) 로 보고, 가까운 y(near, ROI 하단)와 먼 y(far,
+    ROI 상단)에서의 x 를 외삽해 차선 중앙을 구한다. near 의 중앙이 횡오차(offset),
+    near→far 중앙 변화가 곡률(curvature) 이다.
 
-    ⚠️ 단일 무게중심의 함정(split_lanes): 밴드 전체 열에 대해 단일 무게중심을
-    구하면, 좌우 두 라인이 동시에 잡힐 때 무게중심이 두 라인 사이의 *빈 노면*을
-    가리킵니다. D-Racer 트랙처럼 양쪽 경계선이 있을 수 있는 구조에서는
-    `split_lanes=True` 로 좌/우 질량을 나눠 각 라인을 따로 구하고 그 중점을
-    차선 중앙으로 삼습니다. 한쪽만 보이면 그 라인 + 차폭(lane_half_norm)으로
-    반대쪽을 추정합니다. 단일 라인(예: 주황 중앙선)만 추종할 때는
-    `split_lanes=False`.
+    좌/우 분리(split_lanes):
+      - split_lanes=True (양쪽 경계선 트랙): 세그먼트를 화면 중앙(원본 w/2 를 ROI
+        로컬로 투영한 분할선) 기준 좌/우로 나눠 각각 평균 피팅하고, 두 라인의
+        중점을 차선 중앙으로 삼는다. 한쪽만 보이면 그 라인 ± 차폭(lane_half_norm)
+        으로 반대쪽을 추정한다.
+      - split_lanes=False (단일 중앙선, 예: 주황 라인): 검출된 모든 라인을 하나로
+        평균해 그 라인 자체를 추종한다.
 
-    ⚠️ split_lanes 의 한계 (실측 데이터 없이 코드로 확정하지 말 것):
-      1) 고정 분할선 — 분할선은 '원본 이미지 중앙(w/2)'을 ROI 로컬 좌표로
-         투영한 고정 열이다. 급커브에서 좌/우 경계선이 모두 화면 같은 반쪽으로
-         몰리면 한쪽 side 로 병합돼 오검출한다. 적응형(질량 골짜기 기반) 분할선은
-         실차 데이터 확보 후 도입할 것. 현재는 valid_bands(유효 밴드 수)와
-         '한쪽-only 폴백'을 반환해 하류(inference_node)가 신뢰도를 낮출 수
-         있게만 한다.
-      2) per-side 픽셀 게이트 — 좌/우 각각 side_min_px(기본 valid_min_px/2)를
-         통과한 side 만 신뢰한다. 한쪽 노이즈 몇 px 가 phantom 무게중심으로
-         채택돼 차선 중앙을 끌어당기는 것을 차단한다.
-      3) lane_half_norm — 한쪽 라인만 보일 때 반대쪽을 추정하는 정규화 반차폭.
-         기본 0.5 = '차선 반폭 = 이미지 반폭의 0.5'(≈ 차선 폭이 이미지 폭의 절반)
-         가정이다. 흰 경계선 트랙에서 한쪽 소실 구간의 조향 정확도를 좌우하므로
-         실측 튜닝 대상.
+    이진화 경로(method)는 밴드-무게중심 시절과 동일하게 유지한다 — 트랙 프로파일
+    (brightness/light vs color/dark) 이 그대로 동작하도록:
+      - brightness : 그레이스케일 + adaptiveThreshold(polarity)
+      - color      : HSV inRange 색 마스크
+    이렇게 만든 이진 마스크에서 Canny 에지를 뽑아 HoughLinesP 를 돌린다.
 
-이 모듈은 순수 함수(ROS 비의존)라 오프라인에서 단위 테스트·튜닝이 가능합니다.
+    ⚠️ Hough 방식의 알려진 한계(밴드-무게중심 대비):
+      1) 점선·짧은 마킹은 minLineLength/maxLineGap 튜닝에 민감하다. 마킹이 끊기면
+         세그먼트가 안 잡혀 valid=False 가 될 수 있다(밴드 방식은 질량만 있으면 됨).
+      2) 급커브에서 직선 가정이 깨진다 — near/far 2점 외삽이라 곡선을 직선으로
+         근사한다. 곡률 추정은 near vs far 기울기 차의 근사치일 뿐이다.
+      3) 광택 바닥의 반사/주름이 에지로 잡혀 가짜 라인을 만들 수 있다. 각도
+         게이트(hough_min_angle_deg)로 near-수평 세그먼트(정지선/노이즈)를 버린다.
+    실트랙 튜닝은 Hough 파라미터(threshold/min_line_length/max_line_gap/
+    min_angle_deg/canny_low/high)로 하며, 전부 opencv_node 의 ROS param 이다.
+
+이 모듈은 순수 함수(ROS 비의존)라 오프라인에서 단위 테스트·튜닝이 가능하다.
 
 반환하는 LaneResult 필드:
     offset      [-1, 1]로 정규화된 횡오차. <0 = 차선 중앙이 원본 이미지
-                중앙(w/2, ROI 크롭과 무관)보다 왼쪽(차는 좌조향해야 함),
-                >0 = 오른쪽. 부호→조향 매핑은 하류(steer_sign)에서 적용.
-    valid       `offset`을 신뢰할 만큼 차선 픽셀이 충분히 검출됐으면 True.
-    curvature   [-1, 1]로 정규화된 곡률 추정치. (먼_밴드_offset - 가까운_밴드_offset)를
-                /2 하여 정규화(원시 차이 범위 [-2, 2] → [-1, 1]). |curvature| 가 클수록
-                다가오는 커브가 급함. 0 = 직진(밴드 간 오프셋 차 없음). 부호는 커브 방향.
-    pixels      검출된 차선 픽셀 총수(ROI 전체) — 로깅/튜닝용.
-    valid_bands 오프셋 산출에 실제 기여한 유효 밴드 수. 하류가 신뢰도 판단에 사용
-                (1개뿐이면 곡률=0 이고 오프셋 근거가 약함).
+                중앙(w/2, ROI 크롭과 무관)보다 왼쪽, >0 = 오른쪽. 부호→조향
+                매핑은 하류(steer_sign)에서 적용.
+    valid       Hough 라인이 잡혀 offset 을 신뢰할 수 있으면 True.
+    curvature   [-1, 1] 곡률 추정치. (먼_offset - 가까운_offset)/2. |curvature|가
+                클수록 다가오는 커브가 급함. 부호는 커브 방향.
+    pixels      이진 마스크의 차선 픽셀 총수(ROI 전체) — 로깅/튜닝용.
+    valid_bands 차선 중앙 산출에 기여한 라인 side 수(0/1/2). 하류가 신뢰도 판단에
+                사용(1이면 한쪽만 보여 반대쪽을 추정한 것 → 근거가 약함).
 """
 
+import math
 from dataclasses import dataclass
 
 import cv2
@@ -57,8 +57,8 @@ class LaneResult:
     offset: float
     valid: bool
     curvature: float
-    pixels: int = 0        # 검출된 차선 픽셀 총수(ROI 전체) — 로깅/튜닝용.
-    valid_bands: int = 0   # 오프셋에 기여한 유효 밴드 수 — 신뢰도 판단용.
+    pixels: int = 0        # 이진 마스크의 차선 픽셀 총수(ROI 전체) — 로깅/튜닝용.
+    valid_bands: int = 0   # 차선 중앙에 기여한 라인 side 수 — 신뢰도 판단용.
 
 
 # 극성(polarity): 차선 표시가 노면보다 밝은가 어두운가?
@@ -66,12 +66,6 @@ POLARITY_LIGHT = 'light'  # 어두운 바닥 위 밝은 테이프/도색
 POLARITY_DARK = 'dark'    # 밝은 바닥 위 어두운 라인
 
 # 검출 방식: 'brightness'=그레이스케일 명암(폴라리티), 'color'=HSV 색 마스크.
-# 색 라인(예: 흰 바닥 위 주황 라인)은 'color' 가 훨씬 강건하다 — 그레이스케일은
-# 광택 바닥의 반사·주름을 라인으로 오검출한다(실측 확인).
-#
-# ⚠️ 이 함수의 method 기본값은 'brightness' 지만, opencv_node 는 ROS param
-#    `lane_method` 로 이를 'color' 로 덮어쓴다(CLAUDE.md 10번). 순수 함수를
-#    단독 테스트할 때는 트랙 라인 색에 맞는 method 를 명시적으로 넘길 것.
 METHOD_BRIGHTNESS = 'brightness'
 METHOD_COLOR = 'color'
 
@@ -97,8 +91,7 @@ def _binarize_lane(gray, polarity, block_size=25):
 
     block_size 는 지역 평균을 구하는 이웃 창의 픽셀 크기이며 반드시 홀수여야
     한다(짝수/1 이하면 가장 가까운 유효 홀수로 보정). 이 값은 해상도에 비례해
-    스케일해야 한다 — 이미지가 커지면 같은 물리 영역을 덮기 위해 창도 커져야
-    한다(예: 320×240 에서 25 → 800×600 에서 ≈63).
+    스케일해야 한다.
     """
     block_size = int(block_size)
     if block_size < 3:
@@ -122,19 +115,13 @@ def _binarize_lane(gray, polarity, block_size=25):
 def _denoise(mask, ksize=3):
     """형태학적 열림(MORPH_OPEN: 침식→팽창)으로 산발 노이즈를 제거한다.
 
-    inRange/adaptiveThreshold 직후의 점 노이즈가 valid_min_px 를 우연히 넘겨
-    거짓 밴드를 만드는 것을 막는다. ksize<=1 이면 그대로 반환(비활성).
-
-    ⚠️ open 은 라인을 '메우지' 않는다(닫힘 아님). 오히려 얇은 먼-밴드 흰 선은
-    침식 단계에서 지워져 먼 밴드가 무효가 되고 곡률이 자주 0 이 될 수 있다.
-    실트랙 흰 선 두께 실측 후 MORPH_CLOSE 병행/커널 크기 확정은 튜닝 대상이며,
-    지금은 기본 동작(open, ksize=3)을 유지한다.
+    ksize<=1 이면 그대로 반환(비활성). Hough 이전에 점 노이즈를 줄여 가짜
+    에지·세그먼트를 억제한다.
     """
     if ksize is None or ksize <= 1:
         return mask
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
-    opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    return opened
+    return cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
 
 
 def _norm_offset(cx_local, roi_left, img_half):
@@ -147,57 +134,25 @@ def _norm_offset(cx_local, roi_left, img_half):
     return (roi_left + cx_local - img_half) / img_half
 
 
-def _band_centroid_single(col_mass, roi_left, img_half):
-    """밴드 전체 열 질량의 단일 무게중심 → 정규화 오프셋. 실패 시 (None, 0.0).
+def _line_x_at(seg, y):
+    """세그먼트 (x1,y1,x2,y2) 를 x=f(y) 직선으로 보고 주어진 y 에서의 x 를 외삽.
 
-    정규화 기준은 '원본 이미지 중앙'(img_half=w/2) — _norm_offset 참조.
+    수평(y1==y2) 세그먼트는 수직 외삽이 불가능하므로 None 반환(호출 전에 각도
+    게이트로 이미 걸러지지만 0 나눗셈 방어).
     """
-    total = float(col_mass.sum())
-    if total <= 0.0:
-        return None, 0.0
-    cols = np.arange(col_mass.shape[0], dtype=np.float32)
-    centroid_local = float((cols * col_mass).sum() / total)
-    return _norm_offset(centroid_local, roi_left, img_half), total
+    x1, y1, x2, y2 = seg
+    if y2 == y1:
+        return None
+    m = (x2 - x1) / float(y2 - y1)
+    return x1 + m * (y - y1)
 
 
-def _band_centroid_split(col_mass, roi_left, img_half, lane_half_norm, side_min_px):
-    """좌/우 질량을 나눠 각 라인 무게중심을 구하고 그 중점을 차선 중앙으로.
-
-    - 분할선: 원본 이미지 중앙(img_half)을 ROI 로컬 좌표로 투영한 고정 열.
-    - per-side 게이트: 좌/우 각각 side_min_px 픽셀 이상 통과한 side 만 신뢰
-      (한쪽 노이즈 몇 px 가 phantom 무게중심으로 채택되는 것을 차단).
-    - 좌우 모두 통과: 중점 = (left + right)/2.
-    - 한쪽만 통과: 그 라인에서 차폭(lane_half_norm)만큼 안쪽으로 이동해 추정.
-      (예: 왼쪽만 보이면 center = left_off + lane_half_norm)
-    - 둘 다 미통과: (None, 0.0) → 해당 밴드 무효.
-    정규화 기준은 _band_centroid_single 과 동일(원본 이미지 중앙).
-    반환: (정규화 오프셋 or None, 채택된 side 들의 총 질량)
-    """
-    roi_w = col_mass.shape[0]
-    # 원본 이미지 중앙을 ROI 로컬 좌표로 투영해 분할선으로 사용.
-    split_local = int(round(img_half - roi_left))
-    split_local = max(0, min(split_local, roi_w))
-    left_mass = col_mass[:split_local]
-    right_mass = col_mass[split_local:]
-
-    def side_offset(mass, base_idx):
-        t = float(mass.sum())
-        if t < side_min_px:      # per-side 게이트: 노이즈성 소량 픽셀 배제
-            return None, 0.0
-        c = np.arange(mass.shape[0], dtype=np.float32)
-        cx_local = float((c * mass).sum() / t) + base_idx
-        return _norm_offset(cx_local, roi_left, img_half), t
-
-    left_off, left_t = side_offset(left_mass, 0)
-    right_off, right_t = side_offset(right_mass, split_local)
-
-    if left_off is not None and right_off is not None:
-        return (left_off + right_off) / 2.0, left_t + right_t
-    if left_off is not None:
-        return left_off + lane_half_norm, left_t
-    if right_off is not None:
-        return right_off - lane_half_norm, right_t
-    return None, 0.0
+def _avg_x(points, idx):
+    """(x_near, x_far) 튜플 리스트에서 idx(0=near,1=far) 평균."""
+    n = len(points)
+    if n == 0:
+        return None
+    return sum(p[idx] for p in points) / float(n)
 
 
 def compute_lane_offset(
@@ -205,7 +160,7 @@ def compute_lane_offset(
     roi_top=50,
     roi_left=0,
     roi_right=None,
-    num_bands=3,
+    num_bands=3,          # (호환용, Hough 방식에선 미사용)
     valid_min_px=40,
     polarity=POLARITY_LIGHT,
     method=METHOD_BRIGHTNESS,
@@ -214,25 +169,27 @@ def compute_lane_offset(
     morph_ksize=3,
     split_lanes=False,
     lane_half_norm=0.5,
-    side_min_px=None,
+    side_min_px=None,     # (호환용, Hough 방식에선 미사용)
     block_size=25,
+    hough_threshold=30,
+    hough_min_line_length=20,
+    hough_max_line_gap=15,
+    hough_min_angle_deg=25.0,
+    canny_low=50,
+    canny_high=150,
 ):
-    """BGR 프레임에서 정규화된 횡방향 차선 오프셋을 추정.
+    """BGR 프레임에서 Hough 라인으로 정규화된 횡방향 차선 오프셋을 추정.
 
     파라미터는 opencv_node 의 ROS param 과 대응 — 튜닝을 코드가 아닌 설정에서
-    하도록 함 (CLAUDE.md 9.4). 반환 필드는 모듈 독스트링 참조.
+    하도록 함(CLAUDE.md 9.4). 반환 필드는 모듈 독스트링 참조.
 
-    method='color' 이면 HSV 색 마스크(hsv_lower~hsv_upper)로 라인을 검출한다.
-    흰/회색 바닥 위 유색 라인에는 이쪽이 강건하다. 'brightness' 는 그레이스케일
-    명암(polarity) 방식.
+    이진화(method/polarity/color/split_lanes)는 밴드-무게중심 시절과 동일해
+    트랙 프로파일이 그대로 동작한다. 그 이진 마스크에서 Canny 에지를 뽑아
+    HoughLinesP 로 세그먼트를 검출하고 좌/우 차선을 피팅한다.
 
-    split_lanes=True 이면 좌/우 라인을 분리해 그 중점을 차선 중앙으로 삼는다
-    (양쪽 경계선 트랙). False 이면 단일 무게중심(단일 중앙선 추종).
-    lane_half_norm 은 한쪽 라인만 보일 때 반대쪽을 추정하기 위한 정규화 반차폭.
-    side_min_px 는 split 모드의 per-side 픽셀 게이트(None → valid_min_px/2).
-
-    오프셋 정규화 기준은 항상 '원본 이미지 중앙(w/2)' 이다 — 비대칭 ROI
-    (roi_left>0/roi_right<w) 에서도 offset=0 이 카메라 중심선을 뜻한다.
+    num_bands / side_min_px 는 밴드-무게중심 방식의 잔여 인자로 Hough 에선
+    사용하지 않지만, 기존 호출부(opencv_node / 튜닝 하니스) 호환을 위해 시그니처를
+    유지한다.
     """
     if image_bgr is None or image_bgr.size == 0:
         return LaneResult(0.0, False, 0.0)
@@ -257,62 +214,100 @@ def compute_lane_offset(
     # ROI 전체에서 검출된 라인 픽셀 총수 — valid_min_px 튜닝/로깅용.
     total_px = int((mask > 0).sum())
 
-    # 오프셋 정규화 기준 = 원본 이미지 중앙(w/2). ROI 중앙이 아니라 원본 중앙을
-    # 써야 비대칭 ROI 에서도 offset=0 이 카메라 중심선을 가리킨다.
-    img_half = w / 2.0
-    # split 모드 per-side 게이트: 지정 없으면 밴드 유효 임계의 절반.
-    side_gate = (valid_min_px / 2.0) if side_min_px is None else float(side_min_px)
-
     roi_h, roi_w = mask.shape[:2]
-    num_bands = max(1, int(num_bands))
-    band_h = max(1, roi_h // num_bands)
+    img_half = w / 2.0
+    # 원본 이미지 중앙을 ROI 로컬 좌표로 투영한 좌/우 분할선.
+    split_local = int(round(img_half - roi_left))
+    split_local = max(0, min(split_local, roi_w))
 
-    band_offsets = []  # (밴드 인덱스, 정규화 오프셋); 인덱스 0 = 가장 가까움(하단)
-    for i in range(num_bands):
-        # 밴드 0 이 ROI 의 최하단(가장 가까운) 슬라이스.
-        y1 = max(0, roi_h - (i + 1) * band_h)
-        y2 = roi_h - i * band_h
-        band = mask[y1:y2, :]
-
-        col_mass = band.sum(axis=0).astype(np.float32) / 255.0
-
-        # 밴드 유효성은 '해당 밴드의 총 질량'으로 판정(ROI 전체가 아니라).
-        if float(col_mass.sum()) < valid_min_px:
-            continue
-
-        if split_lanes:
-            off, _ = _band_centroid_split(
-                col_mass, roi_left, img_half, lane_half_norm, side_gate)
-        else:
-            off, _ = _band_centroid_single(col_mass, roi_left, img_half)
-
-        if off is None:
-            continue
-        band_offsets.append((i, float(off)))
-
-    if not band_offsets:
+    # 마스크 픽셀이 너무 적으면 라인 신뢰 불가(조기 종료).
+    if total_px < valid_min_px:
         return LaneResult(0.0, False, 0.0, pixels=total_px, valid_bands=0)
 
-    # 가까운 밴드에 더 큰 가중치(현재 위치 반영), 먼 밴드는 약한 피드포워드.
-    # 가중치 = num_bands - 밴드 인덱스.
-    weight_sum = 0.0
-    offset_acc = 0.0
-    for band_index, off in band_offsets:
-        weight = float(num_bands - band_index)
-        offset_acc += weight * off
-        weight_sum += weight
-    offset = offset_acc / weight_sum if weight_sum > 0 else 0.0
+    # 이진 마스크 → 에지 → 확률적 허프 변환.
+    edges = cv2.Canny(mask, int(canny_low), int(canny_high))
+    lines = cv2.HoughLinesP(
+        edges,
+        rho=1,
+        theta=np.pi / 180.0,
+        threshold=int(hough_threshold),
+        minLineLength=int(hough_min_line_length),
+        maxLineGap=int(hough_max_line_gap),
+    )
 
-    # 곡률: '첫(가장 가까운) 유효 밴드' 대 '마지막(가장 먼) 유효 밴드' 를 명시적으로
-    # 집는다. band_offsets 는 인덱스 오름차순(가까움→멈)이므로 [0]=near, [-1]=far.
-    # 유효 밴드가 1개뿐이면 곡률 0(비교 대상 없음).
-    near_off = band_offsets[0][1]
-    far_off = band_offsets[-1][1]
-    raw_curvature = far_off - near_off  # 범위 [-2, 2]
-    curvature = float(np.clip(raw_curvature / 2.0, -1.0, 1.0))
+    if lines is None:
+        return LaneResult(0.0, False, 0.0, pixels=total_px, valid_bands=0)
 
-    offset = float(np.clip(offset, -1.0, 1.0))
+    # near = ROI 하단(가장 가까움), far = ROI 상단(가장 멈). y 는 ROI 로컬(위=0).
+    y_near = roi_h - 1
+    y_far = 0
+
+    left = []       # [(x_near, x_far), ...]  분할선 왼쪽 라인
+    right = []      # 분할선 오른쪽 라인
+    all_lines = []  # split_lanes=False 용 전체
+
+    for ln in lines:
+        # HoughLinesP 반환 shape 는 버전에 따라 (N,1,4) 또는 (N,4) — flatten 해서 통일.
+        vals = np.asarray(ln, dtype=np.float64).reshape(-1)
+        x1, y1, x2, y2 = float(vals[0]), float(vals[1]), float(vals[2]), float(vals[3])
+        dx = x2 - x1
+        dy = y2 - y1
+        # 각도 게이트: near-수평 세그먼트(정지선/노이즈)는 버림. 차선은 거의 수직.
+        angle = math.degrees(math.atan2(abs(dy), abs(dx)))
+        if angle < hough_min_angle_deg:
+            continue
+        seg = (x1, y1, x2, y2)
+        xn = _line_x_at(seg, y_near)
+        xf = _line_x_at(seg, y_far)
+        if xn is None or xf is None:
+            continue
+        all_lines.append((xn, xf))
+        # near 위치로 좌/우 분류(분할선 기준).
+        if xn < split_local:
+            left.append((xn, xf))
+        else:
+            right.append((xn, xf))
+
+    lane_half_px = lane_half_norm * img_half  # 정규화 반차폭 → 픽셀
+
+    center_near = None
+    center_far = None
+    valid_bands = 0
+
+    if split_lanes:
+        ln_near, ln_far = _avg_x(left, 0), _avg_x(left, 1)
+        rn_near, rn_far = _avg_x(right, 0), _avg_x(right, 1)
+        if ln_near is not None and rn_near is not None:
+            center_near = (ln_near + rn_near) / 2.0
+            center_far = (ln_far + rn_far) / 2.0
+            valid_bands = 2
+        elif ln_near is not None:
+            center_near = ln_near + lane_half_px
+            center_far = ln_far + lane_half_px
+            valid_bands = 1
+        elif rn_near is not None:
+            center_near = rn_near - lane_half_px
+            center_far = rn_far - lane_half_px
+            valid_bands = 1
+    else:
+        an_near, an_far = _avg_x(all_lines, 0), _avg_x(all_lines, 1)
+        if an_near is not None:
+            center_near = an_near
+            center_far = an_far
+            valid_bands = 1
+
+    if center_near is None:
+        return LaneResult(0.0, False, 0.0, pixels=total_px, valid_bands=0)
+
+    off_near = _norm_offset(center_near, roi_left, img_half)
+    off_far = _norm_offset(center_far, roi_left, img_half)
+
+    # 현재 위치(near)에 더 큰 가중치, 먼 지점(far)은 약한 피드포워드 반영.
+    offset = float(np.clip((2.0 * off_near + off_far) / 3.0, -1.0, 1.0))
+    # 곡률: near→far 중앙 변화. 원시 범위 [-2,2] → /2 정규화.
+    curvature = float(np.clip((off_far - off_near) / 2.0, -1.0, 1.0))
+
     return LaneResult(
         offset, True, curvature,
-        pixels=total_px, valid_bands=len(band_offsets),
+        pixels=total_px, valid_bands=valid_bands,
     )

@@ -54,6 +54,17 @@ class OpenCvNode(Node):
         # (320×240 → 25, 800×600 → 63). 짝수/1 이하는 내부에서 홀수로 보정.
         self.declare_parameter('lane_block_size', 25)
 
+        # --- Hough 라인 검출 파라미터 (lane_detect Hough 방식) ---
+        # 이진 마스크 → Canny 에지 → HoughLinesP. 픽셀 기준 값은 해상도에 비례해
+        # 스케일할 것(min_line_length/max_line_gap). min_angle_deg 로 near-수평
+        # 세그먼트(정지선/노이즈)를 버린다. 실트랙 튜닝 대상.
+        self.declare_parameter('hough_threshold', 30)
+        self.declare_parameter('hough_min_line_length', 20)
+        self.declare_parameter('hough_max_line_gap', 15)
+        self.declare_parameter('hough_min_angle_deg', 25.0)
+        self.declare_parameter('canny_low', 50)
+        self.declare_parameter('canny_high', 150)
+
         subscribe_topic = str(self.get_parameter('subscribe_topic').value)
         self.jpeg_quality = int(self.get_parameter('jpeg_quality').value)
         self.debug_log = bool(self.get_parameter('debug_log').value)
@@ -71,6 +82,12 @@ class OpenCvNode(Node):
         self.lane_half_norm = float(self.get_parameter('lane_half_norm').value)
         self.morph_ksize = int(self.get_parameter('morph_ksize').value)
         self.lane_block_size = int(self.get_parameter('lane_block_size').value)
+        self.hough_threshold = int(self.get_parameter('hough_threshold').value)
+        self.hough_min_line_length = int(self.get_parameter('hough_min_line_length').value)
+        self.hough_max_line_gap = int(self.get_parameter('hough_max_line_gap').value)
+        self.hough_min_angle_deg = float(self.get_parameter('hough_min_angle_deg').value)
+        self.canny_low = int(self.get_parameter('canny_low').value)
+        self.canny_high = int(self.get_parameter('canny_high').value)
 
         # --- 프로파일 프리셋 해석 (개별 param 명시 시 덮어씀) ---
         profiles = {
@@ -202,6 +219,12 @@ class OpenCvNode(Node):
                 split_lanes=self.split_lanes,
                 lane_half_norm=self.lane_half_norm,
                 block_size=self.lane_block_size,
+                hough_threshold=self.hough_threshold,
+                hough_min_line_length=self.hough_min_line_length,
+                hough_max_line_gap=self.hough_max_line_gap,
+                hough_min_angle_deg=self.hough_min_angle_deg,
+                canny_low=self.canny_low,
+                canny_high=self.canny_high,
             )
             # 발행 계약은 [offset, valid, curvature] 3원소 유지(문서화된 인터페이스).
             # valid_bands 는 LaneResult 에 있고 아래 진단 로그로 노출 — inference 가
