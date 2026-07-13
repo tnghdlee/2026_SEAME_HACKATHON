@@ -212,8 +212,24 @@ ros2 launch control auto_driving.launch.py
   - **`/lane/offset` 산출**: near(BEV 하단 y=warp_h-1)·far(상단 y=0) 차선 중앙의 정규화 오프셋에서 `offset=(2·off_near+off_far)/3`(near 가중+far 피드포워드), `curvature=(off_far-off_near)/2` clip `[-1,1]`. **발행 배열은 `[offset, valid, curvature]` 3원소 유지**(문서화된 인터페이스 — `inference_node` PD 조향 그대로 호환). `LaneResult`의 `pixels`/`valid_bands`(0/1/2)·`left_detected`/`right_detected`·`overlay`는 진단·디버그용.
   - **디버그 영상**: `/opencv/image/edge`는 기존 `Canny(50,150)`(차선 오프셋과 무관한 monitor 시각화용) 유지. **신규 `/opencv/image/lane`**(`publish_lane_debug`, 기본 True)는 **BEV 조감도 + 슬라이딩 윈도우/적합 곡선/중앙선 오버레이** — BEV 4점 캘리브레이션·튜닝은 이 영상을 보고 한다.
   - ⚠️ **BEV 4점 캘리브레이션(실차 필수·최우선)**: `bev_src_*` 기본값은 출발점일 뿐이다. 직선 구간에 차를 세우고 `/opencv/image/lane` 조감도에서 **좌우 차선이 세로로 나란한 평행선**이 되도록 상단 두 점(tl,tr)의 y·좌우 폭을 맞춰야 `offset=0`이 카메라 중심선을 뜻한다.
+
+    ```bash
+    # BEV 4점 오버라이드 예시(조감도가 평행선이 되도록 실측 조정)
+    ros2 run opencv opencv_node --ros-args \
+      -p bev_src_tl:="[0.22, 0.60]" -p bev_src_tr:="[0.78, 0.60]" \
+      -p bev_src_br:="[1.05, 1.00]" -p bev_src_bl:="[-0.05, 1.00]"
+    ```
   - **진단 로깅**: 약 15프레임마다 `valid/offset/curvature/pixels/valid_bands/L/R` + 프로파일·method 출력 — `valid=False`인데 `pixels`가 `lane_valid_min_px` 근처면 BEV 안에 라인이 거의 없다는 뜻(**BEV 4점**/HSV/threshold 재확인), `pixels=0`이면 원본에 검출 색/명암 없음(라인 색/조명 재확인).
   - **검증(차량 없이)**: `compute_lane_offset` 순수 함수 합성 이미지 단위 테스트(`opencv/test/test_lane_detect.py`) — (a) 출발점 히스토그램, (b) 대칭 직선→offset≈0·curvature≈0, (c) 우측 이동→+offset, (d) 우커브→+curvature, (e) 좌커브→−curvature, (f) 한쪽 소실→`valid_bands=1` 폴백, (g) 미검출→`valid=False`. cv2+numpy 있는 개발 박스에서 **7 PASS**. 실트랙 BEV 4점·임계값 튜닝은 보드에서 재실행.
+  - **교체 후 빌드·검증(드롭인)**: 발행 인터페이스(`/lane/offset [offset,valid,curvature]`)와 monitor 디버그 토픽(gray/blur/edge)이 그대로라 **`inference_node`·대시보드 배선은 변경 불필요** — `opencv`만 재빌드하면 된다.
+
+    ```bash
+    colcon build --packages-select opencv && source install/setup.bash
+    ros2 launch control auto_driving.launch.py            # white_track(대회)
+    ros2 topic echo /lane/offset                          # 발행 확인
+    ros2 topic info /lane/offset                          # pub/sub 연결 확인(8.2)
+    python3 src/opencv/opencv/test/test_lane_detect.py    # 차량 없이 7 PASS
+    ```
 
 ### 10.1 채택 모델 · 경로 · 클래스 매핑 (확정)
 
