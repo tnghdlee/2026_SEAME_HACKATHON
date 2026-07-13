@@ -36,6 +36,11 @@ def generate_launch_description():
     # brightness/light/split_lanes=True. 연습 트랙(회색 바닥+주황 라인)에서
     # 실주행 테스트할 때만 lane_profile:=orange_track 으로 전환.
     lane_profile = LaunchConfiguration('lane_profile')
+    # 출발 직진 유예(제어 프레임): 초록불 출발 확정 후 이 프레임 수 동안 표지판
+    # 분기를 억제하고 직진(차선 추종)한다. 실코스가 출발→S자→갈림길 순이라
+    # 출발 직후 (오)검출로 즉시 꺾이는 것을 막는다. 20Hz 기준 100≈5s.
+    # 실제 갈림길까지 걸리는 시간에 맞춰 튜닝(짧으면 조기 분기, 길면 분기 놓침).
+    start_straight_frames = LaunchConfiguration('start_straight_frames')
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -58,6 +63,12 @@ def generate_launch_description():
             default_value='white_track',
             description=('차선 트랙 프로파일. 기본 white_track(대회: 검은 바닥+흰 '
                          '경계선, brightness/light/split). 연습 트랙은 orange_track.'),
+        ),
+        DeclareLaunchArgument(
+            'start_straight_frames',
+            default_value='100',
+            description=('출발 직진 유예(제어 프레임, 20Hz 기준 100≈5s). 초록불 출발 '
+                         '후 이 구간 동안 표지판 분기를 억제하고 직진한다. 0=비활성.'),
         ),
         Node(
             package='camera',
@@ -182,6 +193,10 @@ def generate_launch_description():
                     'commit_lane_weight': 0.3,  # 커밋 중 차선 PD 비중(0=차선무시,1=평소)
                     'commit_steer_slew': 0.30,  # 커밋 중 조향 변화 상한(분기 신속완성)
                     'fork_commit_frames': 30,  # 커밋 지속(제어 프레임, 30@20Hz≈1.5s)
+                    # 출발 직진 유예(제어 프레임): 출발 후 이 구간 동안 표지판 분기
+                    # 억제·직진. 출발→S자→갈림길 순서 대응. 0=비활성.
+                    'start_straight_frames': ParameterValue(
+                        start_straight_frames, value_type=int),
                     # --- 속도 (트랙 현장 조정 대상) ---
                     'lane_lost_throttle': 0.10,
                 },

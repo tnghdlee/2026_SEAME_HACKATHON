@@ -121,6 +121,44 @@ def test_curve_feedforward():
     assert s_ff2 < 0.0, 'curve_ff>0 + 좌커브 → 좌조향'
 
 
+def test_start_straight_grace():
+    # 출발 직진 유예: 초록불 출발 후 grace 동안 표지판이 계속 보여도 분기 안 함.
+    p = DrivingPolicy({'require_green_start': True, 'confirm_frames': 2,
+                       'start_straight_frames': 4, 'turn_bias': 0.5,
+                       'steer_sign': 1.0, 'fork_commit_frames': 5,
+                       'steer_slew': 1.0, 'cruise_throttle': 0.15})
+    # 초록불 확정 → 출발(유예 4프레임 arm).
+    p.on_detections([Det(GREENLIGHT, 0.9)])
+    p.on_detections([Det(GREENLIGHT, 0.9)])
+    assert p.green_started and p.start_straight_remaining == 4
+    # 유예 중 좌회전 표지판이 계속 보여도 turn_intent 래치 안 됨(직진 유지).
+    for _ in range(3):
+        p.on_detections([Det(LEFT_SIGN, 0.9)])
+        s, t = p.step(straight())
+        assert p.turn_intent is None, '유예 중에는 분기 억제(직진)'
+        assert t == 0.15, '유예 중 순항 throttle(커밋 아님)'
+    # 유예 소진(step 을 몇 번 더 호출해 카운트다운 완료).
+    for _ in range(3):
+        p.step(straight())
+    assert p.start_straight_remaining == 0
+    # 유예 종료 후 새로 confirm_frames 를 채우면 정상 분기.
+    p.on_detections([Det(LEFT_SIGN, 0.9)])
+    p.on_detections([Det(LEFT_SIGN, 0.9)])
+    assert p.turn_intent == 'left', '유예 종료 후에는 실제 갈림길에서 분기'
+
+
+def test_start_straight_disabled_by_default():
+    # start_straight_frames=0(기본) 이면 예전 동작: 출발 후 표지판 즉시 분기.
+    p = DrivingPolicy({'require_green_start': True, 'confirm_frames': 2,
+                       'steer_sign': 1.0, 'fork_commit_frames': 5, 'steer_slew': 1.0})
+    p.on_detections([Det(GREENLIGHT, 0.9)])
+    p.on_detections([Det(GREENLIGHT, 0.9)])
+    assert p.start_straight_remaining == 0
+    p.on_detections([Det(LEFT_SIGN, 0.9)])
+    p.on_detections([Det(LEFT_SIGN, 0.9)])
+    assert p.turn_intent == 'left', '유예 0 이면 즉시 분기(하위호환)'
+
+
 def _run_all():
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     for fn in fns:

@@ -77,6 +77,12 @@ def default_params():
         'fork_commit_frames': 30,    # 제어 프레임(30@20Hz≈1.5s)
         'sign_margin': 0.15,
         'sign_conf': 0.35,
+        # 출발 직진 유예(제어 프레임): 초록불 출발 확정 후 이 프레임 수 동안은
+        # 표지판 분기 래치를 억제해 직진(차선 추종)한다. 실코스가 출발→S자→
+        # 갈림길 순서이므로 출발 직후 (오)검출된 표지판으로 즉시 꺾이지 않게 한다.
+        # 유예가 끝나면 실제 갈림길에서 새로 confirm_frames 를 채워야 분기한다.
+        # 0 이면 비활성(예전 동작: 표지판 확정 즉시 분기). 20Hz 기준 100≈5s.
+        'start_straight_frames': 0,
         # 방향(정/역 트랙 미러링)
         'drive_direction': 1.0,
     }
@@ -126,6 +132,8 @@ class DrivingPolicy:
         self.red_stopped = False
         self.turn_intent = None       # 'left' | 'right' | None (첫 확정 래치)
         self.fork_remaining = 0
+        # 출발 직진 유예 잔여(제어 프레임). 출발 확정 전이에서 arm, step 에서 감소.
+        self.start_straight_remaining = 0
 
         # --- 연속 프레임 스트릭 ---
         self._green_streak = 0
@@ -166,6 +174,8 @@ class DrivingPolicy:
                 self.last_steer = p['steer_trim']
                 self.last_offset = 0.0
                 self.corner_hold = 0.0
+                # 출발 직후 직진 유예 arm — 이 구간 동안 분기 래치 억제.
+                self.start_straight_remaining = p['start_straight_frames']
             self.green_started = True
             # 초록불 재확정 시 빨간불 정지 해제(정지/재출발). 도착 영구정지를
             # 원하면 green_resumes_from_red=False 로 끈다.
@@ -178,6 +188,11 @@ class DrivingPolicy:
         # 좌/우 margin 게이팅 후 스트릭 → turn_intent 래치(첫 확정 우선).
         side = resolve_sign(best.get(LEFT_SIGN, 0.0), best.get(RIGHT_SIGN, 0.0),
                             p['sign_margin'], p['sign_conf'])
+        # 출발 직진 유예 중에는 표지판을 무시(직진 유지). side=None 으로 만들면
+        # 아래 else 가지에서 좌/우 스트릭이 0 으로 리셋되어, 유예 종료 후 실제
+        # 갈림길에서 새로 confirm_frames 를 채워야 분기한다.
+        if self.green_started and self.start_straight_remaining > 0:
+            side = None
         if side == 'left':
             self._left_streak += 1
             self._right_streak = 0
@@ -228,6 +243,9 @@ class DrivingPolicy:
         # 소진하지 않는다 — 출발 전 표지판이 보여도 fork_remaining 이 낭비되지
         # 않게 해, 실제 출발 후 갈림길에서 온전한 커밋 창을 쓴다.
         gated = p['require_green_start'] and not self.green_started
+        # 출발 후 직진 유예 카운트다운(출발 확정·게이트 해제 후에만 감소).
+        if self.green_started and not gated and self.start_straight_remaining > 0:
+            self.start_straight_remaining -= 1
         committing = (self.turn_intent is not None and self.fork_remaining > 0
                       and not gated)
         if committing:

@@ -83,6 +83,7 @@ class InferenceNode(Node):
         self.declare_parameter('fork_commit_frames', dp['fork_commit_frames'])
         self.declare_parameter('sign_margin', dp['sign_margin'])
         self.declare_parameter('sign_conf', dp['sign_conf'])
+        self.declare_parameter('start_straight_frames', dp['start_straight_frames'])
         self.declare_parameter('drive_direction', dp['drive_direction'])
 
         self.vehicle_config_file = os.path.expanduser(
@@ -131,6 +132,8 @@ class InferenceNode(Node):
             'fork_commit_frames': int(self.get_parameter('fork_commit_frames').value),
             'sign_margin': float(self.get_parameter('sign_margin').value),
             'sign_conf': float(self.get_parameter('sign_conf').value),
+            'start_straight_frames': int(
+                self.get_parameter('start_straight_frames').value),
             'drive_direction': float(self.get_parameter('drive_direction').value),
         })
         self.policy = DrivingPolicy(params)
