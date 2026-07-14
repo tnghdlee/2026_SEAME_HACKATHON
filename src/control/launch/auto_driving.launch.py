@@ -28,7 +28,7 @@ def generate_launch_description():
     default_model_path = get_default_model_path()
     model_path = LaunchConfiguration('model_path')
     # 라인 트래킹 점검용 런타임 인자. 평상시 기본값은 정상 주행(초록불 게이트 ON,
-    # 순항 0.15). 점검 시 require_green_start:=false cruise_throttle:=0.0 로 주면
+    # 순항 0.175). 점검 시 require_green_start:=false cruise_throttle:=0.0 로 주면
     # 바퀴는 안 굴러가고 조향만 차선에 반응한다.
     require_green_start = LaunchConfiguration('require_green_start')
     cruise_throttle = LaunchConfiguration('cruise_throttle')
@@ -41,6 +41,9 @@ def generate_launch_description():
     # 출발 직후 (오)검출로 즉시 꺾이는 것을 막는다. 20Hz 기준 100≈5s.
     # 실제 갈림길까지 걸리는 시간에 맞춰 튜닝(짧으면 조기 분기, 길면 분기 놓침).
     start_straight_frames = LaunchConfiguration('start_straight_frames')
+    # 출발 킥스타트 지속(초): 초록불 확정 직후 조향 없이 고정 throttle 로 직진.
+    # 0 으로 주면 킥 비활성(초록불 확정 즉시 정상 차선 추종 시작).
+    start_kick_seconds = LaunchConfiguration('start_kick_seconds')
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -55,7 +58,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'cruise_throttle',
-            default_value='0.2',
+            default_value='0.175',
             description='직진 순항 throttle. 조향만 점검하려면 0.0 으로 주면 바퀴가 안 돈다.',
         ),
         DeclareLaunchArgument(
@@ -69,6 +72,12 @@ def generate_launch_description():
             default_value='100',
             description=('출발 직진 유예(제어 프레임, 20Hz 기준 100≈5s). 초록불 출발 '
                          '후 이 구간 동안 표지판 분기를 억제하고 직진한다. 0=비활성.'),
+        ),
+        DeclareLaunchArgument(
+            'start_kick_seconds',
+            default_value='0.0',
+            description=('출발 킥스타트 지속(초). 초록불 확정 직후 조향 없이 고정 '
+                         'throttle 로 직진 출발. 0=킥 비활성(기본). 켜려면 예: 2.0.'),
         ),
         Node(
             package='camera',
@@ -163,23 +172,53 @@ def generate_launch_description():
                     'model_path': model_path,
                     'vehicle_config_file': vehicle_config_path,
                     # --- 인식 확정 프레임(반응 지연 직결. YOLO ≈3Hz → 프레임당 ~0.3s) ---
-                    'start_confirm_frames': 2,  # 초록불 출발 (2≈0.6s, 1≈0.3s)
+                    # 출발 초록불은 recall 우선(미인식=미션 실패). 먼 신호등이
+                    # 간헐 검출돼도 즉시 출발하도록 1프레임 확정.
+                    'start_confirm_frames': 1,  # 초록불 출발 (1≈0.3s)
+                    # 출발 대기 중 초록불 전용 낮은 신뢰도 임계값(먼 신호등 recall).
+                    # 출발 전 초록불에만 적용, 그 외/출발 후엔 conf_threshold(0.25).
+                    'green_start_conf': 0.12,
+                    # 출발 초록불 HSV 색 폴백(YOLO 보완). 출발 전에만 활성.
+                    'green_hsv_fallback': True,
+                    'green_hsv_lower': [40, 80, 80],   # OpenCV H 0~180
+                    'green_hsv_upper': [90, 255, 255],
+                    'green_roi_top_ratio': 0.0,        # 상단 ROI(바닥 배제)
+                    'green_roi_bottom_ratio': 0.6,
+                    'green_min_area': 8.0,             # blob 최소 면적(px²)
+                    'green_blob_score': 0.5,
                     'confirm_frames': 2,        # 좌/우 표지판 분기 (margin 게이팅이 보호)
                     'stop_confirm_frames': 2,   # 빨간불 정지
+                    # 빨간불 오검출(ArUco 구간 '빨간 바닥') 배제 — 기하 게이팅.
+                    # 실제 신호등은 프레임 상단에 작게, 빨간 바닥은 하단에 크게
+                    # 잡힌다. 박스 세로중심이 프레임의 이 비율보다 아래면(바닥) 무시.
+                    # 카메라 각도에 따라 조정: 신호등이 하단에 잡히면 키우고,
+                    # 바닥이 계속 오검출되면 줄인다. /inference/detections 의 box 로 튜닝.
+                    'redlight_max_y_ratio': 0.6,
+                    # 박스 높이가 프레임의 이 비율 이상이면(너무 큼=바닥) 무시.
+                    'redlight_max_h_ratio': 0.5,
                     # 출발 게이트/순항 — 런타임 인자로 노출(라인 트래킹 점검용).
                     'require_green_start': ParameterValue(
                         require_green_start, value_type=bool),
+                    # --- 출발 킥스타트: 초록불 확정 직후 조향 없이 직진 출발 ---
+                    'start_kick_throttle': 0.2,   # 킥스타트 throttle(정지마찰 극복)
+                    # 킥스타트 지속(초). control_hz 로 환산. 0=킥 비활성.
+                    'start_kick_seconds': ParameterValue(
+                        start_kick_seconds, value_type=float),
                     # --- throttle (트랙 현장 조정 대상) ---
                     'cruise_throttle': ParameterValue(
-                        cruise_throttle, value_type=float),  # 직진 순항 (기본 0.2)
-                    'corner_throttle': 0.17,   # 코너 감속 throttle
+                        cruise_throttle, value_type=float),  # 직진 순항 (기본 0.175)
+                    'corner_throttle': 0.165,  # 코너 감속 throttle
                     # 코너 판정 곡률 임계(정규화 [-1,1] 스케일). 실측 직선 curvature
                     # 노이즈가 ~0.04 이므로 0.30 은 사실상 발동 안 됨 → 0.12 로 낮춰
                     # 실제 커브에서 감속되게 함. ctrl 로그의 curv/corner_hold 로 튜닝.
                     'corner_curvature_threshold': 0.12,
                     # 커브 진입 전 예측 감속 홀드 계수(0~1). 클수록 더 일찍/오래 감속 유지.
                     'curve_hold_decay': 0.85,
-                    'turn_throttle': 0.13,     # 갈림길 커밋 중 감속
+                    'turn_throttle': 0.17,     # 갈림길 커밋 중 감속
+                    # 조향 중(바퀴 꺾는 중) throttle: |steer-trim| 이 임계 이상이면
+                    # 실제 조향각에 반응해 감속(곡률 기반 corner_throttle 과 별개).
+                    'steer_throttle': 0.17,
+                    'steer_throttle_threshold': 0.05,
                     # --- 조향 (트랙 현장 조정 대상) ---
                     'steer_sign': -1.0,        # 전체 조향 극성(벤치서 반대면 뒤집기)
                     'steer_kp': 0.6,           # 차선 오프셋 비례 게인
@@ -199,7 +238,22 @@ def generate_launch_description():
                     'start_straight_frames': ParameterValue(
                         start_straight_frames, value_type=int),
                     # --- 속도 (트랙 현장 조정 대상) ---
-                    'lane_lost_throttle': 0.10,
+                    'lane_lost_throttle': 0.19,
+                    # --- ArUco 동적 장애물 정지/재출발 (B.4) ---
+                    # 장애물 마커 등장 시 정지, 소멸 시 재출발(정지 중 스탑워치 멈춤).
+                    'aruco_enabled': True,
+                    'aruco_dict': 'DICT_6X6_50',   # 대회 마커(실측 확정)
+                    'aruco_target_ids': [3],       # 규정 마커 ID. []=아무 마커나 인정
+                    # 근접 게이팅(면적 비율). 0.0=거리 무관. 먼 마커 오정지 시 키운다.
+                    # /inference/detections 로그 대신 ctrl 로그의 aruco_stop 으로 튜닝.
+                    'aruco_min_area_ratio': 0.0,
+                    # ROI: 마커 중심이 이 정규화 사각형[x0,y0,x1,y1] 안일 때만 정지.
+                    # 기본 = 하단 60%·가로 중앙 60%(주행 경로). []=전체 화면.
+                    'aruco_roi_norm': [0.2, 0.4, 0.8, 1.0],
+                    # 비대칭 히스테리시스(9.5): 정지 진입은 민감(작게), 재출발은
+                    # 소멸 확인 후 보수적(크게). 카메라 프레임 rate 단위.
+                    'aruco_stop_confirm_frames': 2,
+                    'aruco_clear_confirm_frames': 6,
                 },
             ],
         ),

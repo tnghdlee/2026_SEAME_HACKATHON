@@ -77,6 +77,14 @@ class OpenCvNode(Node):
         self.declare_parameter('hist_ratio', 0.5)     # 히스토그램에 쓸 하단 비율
         self.declare_parameter('min_lane_px', 200)    # 한쪽 라인 인정 최소 누적 픽셀
         self.declare_parameter('lane_width_ratio', 0.55)  # 한쪽 소실 폴백 차폭(BEV 폭 비율)
+        # 좌/우 둘 다 적합됐을 때 near 간격이 BEV 폭의 이 비율보다 좁으면 같은
+        # 라인에 두 윈도우가 겹쳐 잠긴 것으로 보고 픽셀 많은 쪽만 단일 라인으로
+        # 강등한다(허위 양쪽 검출 배제 → 중앙이 한 선으로 끌려가는 것 방지).
+        self.declare_parameter('lane_min_sep_ratio', 0.30)
+        # 한쪽 소실 폴백 차폭 메모리 EMA 계수(0~1). 양쪽 검출 프레임의 실측 반차폭을
+        # 이 계수로 지수평활해 기억하고, 한쪽 소실 시 폴백에 되먹인다. 0 이면 메모리
+        # 비활성(항상 lane_width_ratio 고정 추정).
+        self.declare_parameter('lane_width_ema', 0.3)
 
         subscribe_topic = str(self.get_parameter('subscribe_topic').value)
         self.jpeg_quality = int(self.get_parameter('jpeg_quality').value)
@@ -109,6 +117,8 @@ class OpenCvNode(Node):
         self.hist_ratio = float(self.get_parameter('hist_ratio').value)
         self.min_lane_px = int(self.get_parameter('min_lane_px').value)
         self.lane_width_ratio = float(self.get_parameter('lane_width_ratio').value)
+        self.lane_min_sep_ratio = float(self.get_parameter('lane_min_sep_ratio').value)
+        self.lane_width_ema = float(self.get_parameter('lane_width_ema').value)
 
         # --- 프로파일 프리셋 해석 (개별 param 명시 시 덮어씀) ---
         profiles = {
@@ -151,6 +161,9 @@ class OpenCvNode(Node):
             self.lane_debug_pub = self.create_publisher(CompressedImage, lane_debug_topic, image_qos)
 
         self._lane_log_count = 0
+        # 한쪽 소실 폴백에 쓸 반차폭 메모리(BEV px). 양쪽 검출 프레임의 실측
+        # 차폭으로 EMA 갱신. 0 이면 아직 미측정(폴백은 lane_width_ratio 고정 추정).
+        self._lane_half_px = 0.0
 
         self.get_logger().info(
             f'OpenCV node started (BEV+sliding-window): subscribe_topic={subscribe_topic}, '
@@ -219,9 +232,24 @@ class OpenCvNode(Node):
                 hist_ratio=self.hist_ratio,
                 min_lane_px=self.min_lane_px,
                 lane_width_ratio=self.lane_width_ratio,
+                min_sep_ratio=self.lane_min_sep_ratio,
+                # 직전 양쪽 검출에서 실측·기억한 반차폭을 한쪽 소실 폴백에 되먹인다.
+                # 0(미측정)이면 함수가 lane_width_ratio 고정 추정으로 폴백.
+                prior_half_px=(self._lane_half_px if self._lane_half_px > 0.0
+                               else None),
                 valid_min_px=self.lane_valid_min_px,
                 draw=want_overlay,
             )
+            # 양쪽 검출(valid_bands==2) 프레임의 실측 반차폭으로 폴백 메모리 EMA 갱신.
+            # 한쪽만 보인 프레임은 폴백값이라 메모리를 오염시키지 않도록 제외한다.
+            if (lane.valid and lane.valid_bands == 2 and lane.lane_width_px > 0.0
+                    and self.lane_width_ema > 0.0):
+                if self._lane_half_px <= 0.0:
+                    self._lane_half_px = lane.lane_width_px        # 첫 측정은 즉시 채택
+                else:
+                    a = self.lane_width_ema
+                    self._lane_half_px = ((1.0 - a) * self._lane_half_px
+                                          + a * lane.lane_width_px)
             # 발행 계약은 [offset, valid, curvature] 3원소 유지(문서화된 인터페이스).
             lane_msg = Float32MultiArray()
             lane_msg.data = [lane.offset, 1.0 if lane.valid else 0.0, lane.curvature]
@@ -242,7 +270,8 @@ class OpenCvNode(Node):
                     f'curvature={lane.curvature:+.3f} pixels={lane.pixels} '
                     f'mask_px={lane.mask_pixels} '
                     f'valid_bands={lane.valid_bands} L={lane.left_detected} '
-                    f'R={lane.right_detected} '
+                    f'R={lane.right_detected} width_px={lane.lane_width_px:.1f} '
+                    f'mem_half={self._lane_half_px:.1f} '
                     f'(profile={self.lane_profile}, method={self.lane_method})'
                 )
 

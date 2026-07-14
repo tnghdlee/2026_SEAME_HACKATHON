@@ -49,6 +49,9 @@
     valid_bands 차선 중앙 산출에 기여한 라인 side 수(0/1/2). 1이면 한쪽만 보여
                 반대쪽을 추정한 것(근거 약함).
     left_detected / right_detected  좌/우 2차 적합 성공 여부(진단).
+    lane_width_px  이번 프레임에서 쓰인 반차폭(near, BEV px). 양쪽 검출 시 실측
+                (right-left)/2, 한쪽 소실 시 폴백값. 노드가 EMA 로 기억해 다음
+                프레임 폴백(prior_half_px)에 되먹여, 한쪽 소실에도 중앙을 유지한다.
     overlay     draw=True 일 때 BEV 시점 디버그 영상(윈도우/적합곡선, BGR). 아니면 None.
 """
 
@@ -80,6 +83,7 @@ class LaneResult:
     valid_bands: int = 0        # 차선 중앙에 기여한 라인 side 수 — 신뢰도 판단용.
     left_detected: bool = False
     right_detected: bool = False
+    lane_width_px: float = 0.0  # 이번 프레임 반차폭(near, BEV px) — 폴백 메모리 피드백용.
     overlay: Optional[np.ndarray] = None  # draw=True 일 때만 채워지는 BEV 디버그 영상.
 
 
@@ -250,6 +254,8 @@ def compute_lane_offset(
     hist_ratio=0.5,
     min_lane_px=200,
     lane_width_ratio=0.55,
+    min_sep_ratio=0.30,
+    prior_half_px=None,
     valid_min_px=40,
     draw=False,
 ):
@@ -257,6 +263,16 @@ def compute_lane_offset(
 
     파라미터는 opencv_node 의 ROS param 과 대응 — 튜닝을 코드가 아닌 설정에서(9.4).
     반환 필드는 모듈 독스트링 참조.
+
+    양쪽 차선 추종 강건화(한쪽만 보고 달리는 증상 방지):
+      - min_sep_ratio: 좌/우 둘 다 적합됐을 때 near 간격이 BEV 폭의 이 비율보다
+        좁으면 두 윈도우가 같은 물리 라인에 겹쳐 잠긴 것으로 보고 픽셀이 많은
+        쪽만 단일 라인으로 강등한다(허위 양쪽 검출 배제).
+      - prior_half_px: 한쪽 소실 폴백에서 쓸 반차폭(BEV px). 노드가 직전 양쪽
+        검출에서 실측한 차폭을 EMA 로 기억해 넘긴다. None/0 이면 lane_width_ratio
+        기반 고정 추정으로 폴백. 실측 차폭을 쓰면 고정 추정 오차로 인한 편향
+        (한쪽 치우침)이 사라진다. 반환 LaneResult.lane_width_px 로 이번 프레임의
+        반차폭을 되돌려 노드가 다음 프레임 prior_half_px 로 되먹인다.
     """
     if image_bgr is None or image_bgr.size == 0:
         return LaneResult(0.0, False, 0.0)
@@ -315,16 +331,33 @@ def compute_lane_offset(
     bev_h, bev_w = binary_bev.shape[:2]
     y_near = bev_h - 1
     y_far = 0
-    half_px = lane_width_ratio * bev_w / 2.0
     img_half = bev_w / 2.0
+
+    # 허위 양쪽 검출 배제: 둘 다 적합됐어도 near 간격이 너무 좁으면(혹은 교차하면)
+    # 두 슬라이딩 윈도우가 같은 물리 라인에 겹쳐 잠긴 것 → 픽셀 많은 쪽만 남긴다.
+    # 겹친 상태로 평균을 내면 중앙이 그 한 선 위로 끌려가 한쪽만 추종하게 된다.
+    if left_detected and right_detected:
+        sep_near = _poly_x(right_fit, y_near) - _poly_x(left_fit, y_near)
+        if sep_near < min_sep_ratio * bev_w:
+            if len(left_inds) >= len(right_inds):
+                right_detected, right_fit = False, None
+            else:
+                left_detected, left_fit = False, None
+
+    # 한쪽 소실 폴백 반차폭: 메모리(prior_half_px, 직전 실측 차폭)를 우선 쓰고,
+    # 없으면 lane_width_ratio 기반 고정 추정. 고정 추정은 실제 차폭과 어긋나면
+    # 남은 한 선 기준 중앙이 편향돼 "한쪽만 보고 달리는" 증상을 만든다.
+    fallback_half = (float(prior_half_px)
+                     if prior_half_px and float(prior_half_px) > 0.0
+                     else lane_width_ratio * bev_w / 2.0)
 
     def lane_center_at(y):
         if left_detected and right_detected:
             return (_poly_x(left_fit, y) + _poly_x(right_fit, y)) / 2.0
         if left_detected:
-            return _poly_x(left_fit, y) + half_px
+            return _poly_x(left_fit, y) + fallback_half
         if right_detected:
-            return _poly_x(right_fit, y) - half_px
+            return _poly_x(right_fit, y) - fallback_half
         return None
 
     center_near = lane_center_at(y_near)
@@ -335,6 +368,14 @@ def compute_lane_offset(
                           valid_bands=0, overlay=overlay)
 
     valid_bands = 2 if (left_detected and right_detected) else 1
+
+    # 이번 프레임 반차폭: 양쪽 검출 시 실측(near), 아니면 폴백값. 노드가 EMA 로
+    # 기억해 다음 프레임 prior_half_px 로 되먹인다(한쪽 소실 구간 중앙 유지).
+    if left_detected and right_detected:
+        lane_width_px = max(
+            0.0, (_poly_x(right_fit, y_near) - _poly_x(left_fit, y_near)) / 2.0)
+    else:
+        lane_width_px = fallback_half
 
     def norm(cx):
         return float(np.clip((cx - img_half) / img_half, -1.0, 1.0))
@@ -361,4 +402,5 @@ def compute_lane_offset(
     return LaneResult(offset, True, curvature, pixels=total_px,
                       mask_pixels=mask_px, valid_bands=valid_bands,
                       left_detected=left_detected,
-                      right_detected=right_detected, overlay=overlay)
+                      right_detected=right_detected,
+                      lane_width_px=float(lane_width_px), overlay=overlay)

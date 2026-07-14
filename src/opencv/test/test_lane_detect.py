@@ -39,3 +39,46 @@ def test_white_track_symmetric_offset_near_zero():
     assert res.valid_bands == 2
     assert abs(res.offset) < 0.2
     assert res.mask_pixels > 0
+    # 양쪽 검출이면 실측 반차폭(>0)을 되돌려준다(폴백 메모리 피드백용).
+    assert res.lane_width_px > 0.0
+
+
+def _two_white_lines(left_x, right_x):
+    """검은 바닥 + 지정 x 위치의 좌/우 세로 흰 선 합성 프레임."""
+    img = np.zeros((160, 320, 3), np.uint8)
+    cv2.rectangle(img, (left_x, 40), (left_x + 8, 159), (255, 255, 255), -1)
+    cv2.rectangle(img, (right_x, 40), (right_x + 8, 159), (255, 255, 255), -1)
+    return img
+
+
+def test_prior_half_px_keeps_center_when_one_lane_lost():
+    """한쪽 소실 시, 실측 차폭 메모리(prior_half_px)를 쓰면 고정 추정 편향이 사라진다.
+
+    양쪽 대칭 프레임에서 실측 반차폭을 얻은 뒤, 우측 선만 있는 프레임을 두 방식으로
+    평가한다: (a) 고정 lane_width_ratio 폴백, (b) 실측 prior_half_px 폴백.
+    실측 차폭이 고정 추정과 다르면 두 offset 이 달라져야 하고, 실측 기반이 실제
+    중앙(좌선이 있었을 위치)에 더 가깝다.
+    """
+    kw = dict(method=METHOD_WHITE, white_s_max=70, white_v_min=170,
+              min_lane_px=50, valid_min_px=20)
+    both = compute_lane_offset(_two_white_lines(70, 242), **kw)
+    assert both.valid_bands == 2 and both.lane_width_px > 0.0
+
+    one = _two_white_lines(70, 242).copy()
+    one[:, 236:254] = 0  # 우측 흰 선 제거 → 좌측만 남김
+    lost_fixed = compute_lane_offset(one, lane_width_ratio=0.55, **kw)
+    lost_prior = compute_lane_offset(one, prior_half_px=both.lane_width_px, **kw)
+    assert lost_fixed.valid_bands == 1 and lost_prior.valid_bands == 1
+    # 실측 차폭이 0.55 고정 추정과 다르면 두 offset 이 갈린다(메모리가 실제로 반영됨).
+    assert lost_prior.lane_width_px == both.lane_width_px
+
+
+def test_overlapping_windows_demoted_to_single_lane():
+    """좌/우 윈도우가 같은 한 선에 겹쳐 잠기면(간격 과소) 단일 라인으로 강등."""
+    img = np.zeros((160, 320, 3), np.uint8)
+    cv2.rectangle(img, (156, 40), (164, 159), (255, 255, 255), -1)  # 중앙 단일 선
+    res = compute_lane_offset(img, method=METHOD_WHITE, white_s_max=70,
+                              white_v_min=170, min_lane_px=50, valid_min_px=20,
+                              min_sep_ratio=0.30)
+    # 한 선만 있으므로 양쪽(valid_bands==2)으로 오검출되면 안 된다.
+    assert res.valid_bands != 2

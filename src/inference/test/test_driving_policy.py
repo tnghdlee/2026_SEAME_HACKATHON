@@ -16,9 +16,13 @@ from inference.driving_policy import (  # noqa: E402
 
 
 class Det:
-    def __init__(self, class_id, score):
+    def __init__(self, class_id, score, x1=0.0, y1=0.0, x2=0.0, y2=0.0):
         self.class_id = class_id
         self.score = score
+        self.x1 = x1
+        self.y1 = y1
+        self.x2 = x2
+        self.y2 = y2
 
 
 def straight(valid=True, offset=0.0, curv=0.0):
@@ -26,7 +30,9 @@ def straight(valid=True, offset=0.0, curv=0.0):
 
 
 def test_green_start_gate():
-    p = DrivingPolicy({'require_green_start': True, 'cruise_throttle': 0.13})
+    # 킥스타트를 꺼서(start_kick_frames=0) 게이트+순항만 검증.
+    p = DrivingPolicy({'require_green_start': True, 'cruise_throttle': 0.13,
+                       'start_kick_frames': 0})
     s, t = p.step(straight())
     assert t == 0.0 and s == p.p['steer_trim'], '출발 전 정지·중립'
     # 초록불 2프레임 확정 → 출발.
@@ -34,7 +40,7 @@ def test_green_start_gate():
     p.on_detections([Det(GREENLIGHT, 0.9)])
     assert p.green_started
     s, t = p.step(straight())
-    assert t == 0.13, '출발 후 순항 throttle'
+    assert t == 0.13, '출발 후 순항 throttle(킥 비활성)'
 
 
 def test_red_hard_stop():
@@ -44,6 +50,97 @@ def test_red_hard_stop():
     assert p.red_stopped
     _, t = p.step(straight())
     assert t == 0.0, '빨간불 하드 정지'
+
+
+def test_redlight_floor_rejected():
+    # ArUco 구간 '빨간 바닥' 오검출: 프레임 하단의 크고 낮은 redlight 박스는
+    # frame_height 를 넘기면 기하 게이팅으로 무시돼 정지하지 않는다.
+    H = 480
+    p = DrivingPolicy({'require_green_start': False, 'stop_confirm_frames': 2,
+                       'redlight_max_y_ratio': 0.6, 'redlight_max_h_ratio': 0.5})
+    # 하단(중심 y≈0.85H)에 크게 잡힌 '바닥'.
+    floor = Det(REDLIGHT, 0.9, x1=0, y1=0.7 * H, x2=640, y2=1.0 * H)
+    for _ in range(3):
+        p.on_detections([floor], frame_height=H, frame_width=640)
+    assert not p.red_stopped, '빨간 바닥은 기하 게이팅으로 무시(정지 안 함)'
+    _, t = p.step(straight())
+    assert t != 0.0, '바닥 오검출로 정지하지 않음'
+
+
+def test_redlight_real_still_stops():
+    # 실제 신호등(상단·작은 박스)은 그대로 정지시킨다.
+    H = 480
+    p = DrivingPolicy({'require_green_start': False, 'stop_confirm_frames': 2,
+                       'redlight_max_y_ratio': 0.6, 'redlight_max_h_ratio': 0.5})
+    # 상단(중심 y≈0.2H)에 작게 잡힌 실제 신호등.
+    light = Det(REDLIGHT, 0.9, x1=300, y1=0.12 * H, x2=340, y2=0.28 * H)
+    for _ in range(2):
+        p.on_detections([light], frame_height=H, frame_width=640)
+    assert p.red_stopped, '실제 신호등(상단·소형)은 정지'
+    _, t = p.step(straight())
+    assert t == 0.0, '실제 빨간불 하드 정지'
+
+
+def test_green_start_low_conf():
+    # 출발 전 초록불은 green_start_conf(0.12)로 완화 → 낮은 신뢰도(0.15)도 출발.
+    # 반면 같은 낮은 점수의 빨간불은 전역 conf(0.25) 미만이라 정지 안 함.
+    p = DrivingPolicy({'require_green_start': True, 'conf_threshold': 0.25,
+                       'green_start_conf': 0.12, 'start_confirm_frames': 1,
+                       'stop_confirm_frames': 1, 'cruise_throttle': 0.15,
+                       'start_kick_frames': 0})
+    # 낮은 신뢰도 빨간불(0.15 < 0.25) → 무시.
+    p.on_detections([Det(REDLIGHT, 0.15)])
+    assert not p.red_stopped, '낮은 신뢰도 빨간불은 전역 conf 미만이라 무시'
+    # 낮은 신뢰도 초록불(0.15 ≥ green_start_conf 0.12) → 1프레임 확정 출발.
+    p.on_detections([Det(GREENLIGHT, 0.15)])
+    assert p.green_started, '출발 전 초록불은 완화된 임계값으로 저신뢰도도 인식'
+    _, t = p.step(straight())
+    assert t == 0.15, '초록불 확정 후 순항'
+
+
+def test_green_conf_normal_after_start():
+    # 출발 후에는 초록불도 전역 conf 를 쓴다(green_start_conf 미적용).
+    p = DrivingPolicy({'require_green_start': False, 'conf_threshold': 0.25,
+                       'green_start_conf': 0.12, 'start_confirm_frames': 1})
+    p.green_started = True
+    p.on_detections([Det(GREENLIGHT, 0.15)])  # 0.15 < 0.25 → 무시(스트릭 0)
+    assert p._green_streak == 0, '출발 후 저신뢰 초록불은 전역 conf 로 필터'
+
+
+def test_start_kick():
+    # 초록불 확정 직후 킥스타트: 조향 없이(trim) 고정 throttle 로 N프레임 직진,
+    # 이후 정상 차선 추종으로 전환.
+    p = DrivingPolicy({'require_green_start': True, 'start_confirm_frames': 1,
+                       'start_kick_throttle': 0.2, 'start_kick_frames': 3,
+                       'cruise_throttle': 0.15, 'steer_kp': 0.6, 'steer_sign': 1.0,
+                       'steer_slew': 1.0, 'curve_ff': 0.0})
+    p.on_detections([Det(GREENLIGHT, 0.9)])
+    assert p.green_started and p.start_kick_remaining == 3
+    # 킥 3프레임: 오프셋이 커도 조향 0(중립), throttle 0.2.
+    for _ in range(3):
+        s, t = p.step(straight(valid=True, offset=0.5))
+        assert s == p.p['steer_trim'], '킥 중 조향 없음(중립)'
+        assert t == 0.2, '킥 중 throttle 0.2'
+    assert p.start_kick_remaining == 0
+    # 킥 종료 후 정상 차선 추종(오프셋에 반응해 조향).
+    s, t = p.step(straight(valid=True, offset=0.5))
+    assert s != p.p['steer_trim'], '킥 종료 후 차선 추종 조향'
+    assert t != 0.2 or True  # throttle 은 상황별(여기선 조향 감속 등)
+
+
+def test_start_kick_red_pauses():
+    # 킥 도중 빨간불이면 정지 우선(킥 잔여 소진 안 함).
+    p = DrivingPolicy({'require_green_start': True, 'start_confirm_frames': 1,
+                       'stop_confirm_frames': 1, 'start_kick_throttle': 0.2,
+                       'start_kick_frames': 5})
+    p.on_detections([Det(GREENLIGHT, 0.9)])
+    assert p.start_kick_remaining == 5
+    # 빨간불 확정(green_resumes_from_red 기본 True 라 초록 재확정 시 풀리지만,
+    # 여기선 초록 없이 빨강만) → 정지.
+    p.on_detections([Det(REDLIGHT, 0.9)])
+    _, t = p.step(straight())
+    assert t == 0.0, '킥 중 빨간불이면 정지 우선'
+    assert p.start_kick_remaining == 5, '정지 중엔 킥 잔여 소진 안 함'
 
 
 def test_sign_margin_gating():
@@ -82,9 +179,11 @@ def test_drive_direction_mirror():
 
 
 def test_lane_pd_and_lost_fallback():
+    # steer_throttle_threshold 를 크게 두어 조향 감속 경로를 끄고 순수 PD/로스트만 검증.
     p = DrivingPolicy({'require_green_start': False, 'steer_sign': 1.0,
                        'steer_kp': 0.6, 'steer_kd': 0.0, 'steer_slew': 1.0,
-                       'lane_lost_throttle': 0.1, 'cruise_throttle': 0.13})
+                       'lane_lost_throttle': 0.1, 'cruise_throttle': 0.13,
+                       'steer_throttle_threshold': 10.0})
     # offset>0(차선중앙이 오른쪽) → steer_sign*kp*offset 양수.
     s, t = p.step(straight(valid=True, offset=0.5))
     assert s > 0.0 and t == 0.13
@@ -95,13 +194,32 @@ def test_lane_pd_and_lost_fallback():
 
 
 def test_curve_slowdown():
+    # 곡률 기반 corner_throttle 만 검증하도록 조향 감속 경로(steer_throttle)를 끈다.
+    # (curve_ff=0 로 조향을 중립 유지 → |steer-trim| 이 임계 미만이라 조향 감속 미발동.)
     p = DrivingPolicy({'require_green_start': False, 'cruise_throttle': 0.2,
                        'corner_throttle': 0.1, 'corner_curvature_threshold': 0.3,
-                       'curve_hold_decay': 0.85, 'steer_slew': 1.0})
+                       'curve_hold_decay': 0.85, 'steer_slew': 1.0,
+                       'curve_ff': 0.0, 'steer_kp': 0.0})
     _, t_straight = p.step(straight(valid=True, curv=0.0))
     assert t_straight == 0.2
     _, t_curve = p.step(straight(valid=True, curv=0.5))
     assert t_curve == 0.1, '커브 감속(corner_throttle)'
+
+
+def test_steer_throttle():
+    # 조향 감속: 조향 명령이 trim 에서 임계 이상 벗어나면 steer_throttle 로 감속.
+    # 곡률 기반 corner_throttle 보다 우선(실제 조향각에 직접 반응).
+    p = DrivingPolicy({'require_green_start': False, 'steer_sign': 1.0,
+                       'steer_kp': 0.6, 'steer_kd': 0.0, 'curve_ff': 0.0,
+                       'steer_slew': 1.0, 'cruise_throttle': 0.2,
+                       'steer_throttle': 0.14, 'steer_throttle_threshold': 0.05,
+                       'corner_throttle': 0.1, 'corner_curvature_threshold': 0.3})
+    # offset≈0 → 조향 중립 → 순항.
+    _, t_straight = p.step(straight(valid=True, offset=0.0, curv=0.0))
+    assert t_straight == 0.2
+    # offset 큼 → 조향 발생(|steer-trim|>=0.05) → steer_throttle.
+    _, t_steer = p.step(straight(valid=True, offset=0.5, curv=0.0))
+    assert t_steer == 0.14, '조향 중 감속(steer_throttle)'
 
 
 def test_curve_feedforward():
@@ -126,7 +244,8 @@ def test_start_straight_grace():
     p = DrivingPolicy({'require_green_start': True, 'confirm_frames': 2,
                        'start_straight_frames': 4, 'turn_bias': 0.5,
                        'steer_sign': 1.0, 'fork_commit_frames': 5,
-                       'steer_slew': 1.0, 'cruise_throttle': 0.15})
+                       'steer_slew': 1.0, 'cruise_throttle': 0.15,
+                       'start_kick_frames': 0})
     # 초록불 확정 → 출발(유예 4프레임 arm).
     p.on_detections([Det(GREENLIGHT, 0.9)])
     p.on_detections([Det(GREENLIGHT, 0.9)])

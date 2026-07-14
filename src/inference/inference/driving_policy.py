@@ -38,23 +38,50 @@ def default_params():
     """
     return {
         'conf_threshold': 0.25,
+        # 출발 대기 중 초록불 전용(더 낮은) 신뢰도 임계값 — 먼 신호등을 recall
+        # 우선으로 잡는다(미인식=미션 실패, 오검출은 출발선에서 거의 무해).
+        # green_started=False 일 때만 초록불에 적용, 그 외 클래스·출발 후에는
+        # conf_threshold 를 쓴다. ⚠️ YOLO 출력 임계값(YoloOnnx.conf_threshold)도
+        # 이 값까지 낮춰야 낮은 신뢰도 검출이 정책에 전달됨 — inference_node 참조.
+        'green_start_conf': 0.12,
         # 확정 프레임(YOLO 프레임)
         'start_confirm_frames': 2,   # 초록불 출발(B.1)
         'confirm_frames': 2,         # 좌/우 분기(B.3)
         'stop_confirm_frames': 2,    # 빨간불 정지(B.6)
         # 출발 게이트
         'require_green_start': True,
+        # 빨간불 오검출(ArUco 동적 장애물 구간의 '빨간 바닥') 배제 — 기하 게이팅.
+        # 실제 신호등은 프레임 상단에 작게 잡히고, 빨간 바닥은 하단에 크게 잡힌다.
+        # 이 두 값은 on_detections 에 frame_height 가 전달될 때만 적용된다(순수
+        # 단위 테스트는 frame_height 미전달이라 필터 없이 종전대로 동작).
+        # 박스 세로 중심이 프레임 높이의 이 비율보다 아래면 '바닥'으로 보고 무시.
+        'redlight_max_y_ratio': 0.6,
+        # 박스 높이가 프레임 높이의 이 비율 이상이면(=너무 큼) '바닥'으로 보고 무시.
+        'redlight_max_h_ratio': 0.5,
         # 초록불 재확정 시 빨간불 하드 정지를 해제할지(정지/재출발 stop-go).
         # True: 빨간불로 멈춘 뒤 초록불을 다시 확정하면 재출발. 실코스에선 도착
         #   빨간불 뒤 초록불이 다시 나오지 않으므로 B.6 도착 영구정지와 무해하게
         #   양립하고, 정지/재출발 테스트도 가능하다.
         # False: 빨간불 정지를 영구 래치(엄격한 B.6 도착 종료 의미).
         'green_resumes_from_red': True,
+        # 출발 킥스타트: 초록불 확정 직후 '조향 없이(중립) 고정 throttle 로 직진'
+        # 하는 구간. 정지 상태에서 정지마찰을 이기고 곧게 출발시키기 위함. 구간
+        # 동안 차선 PD·갈림길 분기·커브 감속을 모두 무시하고 steer=trim,
+        # throttle=start_kick_throttle 을 낸다. 이후 정상 주행(차선 추종)으로 전환.
+        # 프레임 단위는 제어 프레임(control_hz). inference_node 가 start_kick_seconds
+        # ×control_hz 로 환산해 start_kick_frames 를 덮어쓴다(기본 2s@20Hz=40).
+        'start_kick_throttle': 0.2,
+        'start_kick_frames': 40,
         # throttle
         'cruise_throttle': 0.13,
         'corner_throttle': 0.17,
         'turn_throttle': 0.13,
         'lane_lost_throttle': 0.10,
+        # 조향 감속: 조향 명령이 중립(trim)에서 steer_throttle_threshold 이상
+        # 벗어나면(=바퀴를 꺾는 중) throttle 을 steer_throttle 로 낮춘다. 차선
+        # 곡률 기반 corner_throttle 과 별개로, 실제 조향각에 직접 반응한다.
+        'steer_throttle': 0.14,
+        'steer_throttle_threshold': 0.05,
         # 커브 판정
         'corner_curvature_threshold': 0.30,
         'curve_hold_decay': 0.85,
@@ -134,6 +161,8 @@ class DrivingPolicy:
         self.fork_remaining = 0
         # 출발 직진 유예 잔여(제어 프레임). 출발 확정 전이에서 arm, step 에서 감소.
         self.start_straight_remaining = 0
+        # 출발 킥스타트 잔여(제어 프레임). 초록불 확정 전이에서 arm, step 에서 감소.
+        self.start_kick_remaining = 0
 
         # --- 연속 프레임 스트릭 ---
         self._green_streak = 0
@@ -146,17 +175,54 @@ class DrivingPolicy:
         self.last_offset = 0.0
         self.corner_hold = 0.0
 
+    def _redlight_is_real(self, det, frame_height):
+        """빨간불 검출이 실제 신호등인지(바닥 오검출이 아닌지) 기하로 판정.
+
+        ArUco 동적 장애물 구간(B.4)의 '빨간 바닥'이 redlight 로 오검출돼 차가
+        잘못 정지하는 문제를 막는다. 실제 신호등은 카메라 프레임 상단에 작게
+        잡히고, 빨간 바닥은 하단에 크게 잡히므로 박스의 위치(세로 중심)와
+        크기(높이)로 바닥을 배제한다. frame_height 미전달(순수 단위 테스트 등)
+        시엔 기하 정보가 없으므로 필터를 적용하지 않는다(종전 동작 유지).
+        """
+        if not frame_height:
+            return True
+        p = self.p
+        h = float(frame_height)
+        cy = 0.5 * (det.y1 + det.y2)          # 박스 세로 중심
+        box_h = det.y2 - det.y1
+        if cy > p['redlight_max_y_ratio'] * h:
+            return False                       # 하단 → 바닥으로 간주
+        if box_h > p['redlight_max_h_ratio'] * h:
+            return False                       # 지나치게 큰 박스 → 바닥으로 간주
+        return True
+
     # ---- YOLO 프레임 rate 로 호출 ----
-    def on_detections(self, detections):
-        """detections: class_id/score 속성을 가진 객체 리스트(YoloOnnx.Detection 등)."""
+    def on_detections(self, detections, frame_height=None, frame_width=None):
+        """detections: class_id/score/x1..y2 속성을 가진 객체 리스트(YoloOnnx.Detection 등).
+
+        frame_height 를 넘기면 빨간불 오검출(빨간 바닥, B.4) 기하 게이팅이
+        활성화된다(_redlight_is_real). frame_width 는 향후 확장용(현재 미사용).
+        """
         p = self.p
         conf = p['conf_threshold']
 
-        # 프레임 내 클래스별 최고 점수.
+        # 프레임 내 클래스별 최고 점수. 클래스별 신뢰도 임계값을 적용한다:
+        #  - 출발 전 초록불: green_start_conf(완화) → 먼 신호등 recall 우선.
+        #  - 그 외/출발 후: conf_threshold.
+        # 빨간불은 바닥 오검출을 기하로 배제(_redlight_is_real).
         best = {}
         for d in detections:
-            if d.score >= conf and d.score > best.get(d.class_id, 0.0):
-                best[d.class_id] = d.score
+            cls = d.class_id
+            if cls == GREENLIGHT and not self.green_started:
+                thr = p['green_start_conf']
+            else:
+                thr = conf
+            if d.score < thr:
+                continue
+            if cls == REDLIGHT and not self._redlight_is_real(d, frame_height):
+                continue
+            if d.score > best.get(cls, 0.0):
+                best[cls] = d.score
 
         # 초록/빨강 스트릭 → 래치.
         self._green_streak = self._green_streak + 1 if GREENLIGHT in best else 0
@@ -176,6 +242,8 @@ class DrivingPolicy:
                 self.corner_hold = 0.0
                 # 출발 직후 직진 유예 arm — 이 구간 동안 분기 래치 억제.
                 self.start_straight_remaining = p['start_straight_frames']
+                # 출발 킥스타트 arm — 조향 없이 고정 throttle 로 직진 출발.
+                self.start_kick_remaining = p['start_kick_frames']
             self.green_started = True
             # 초록불 재확정 시 빨간불 정지 해제(정지/재출발). 도착 영구정지를
             # 원하면 green_resumes_from_red=False 로 끈다.
@@ -246,6 +314,12 @@ class DrivingPolicy:
         # 출발 후 직진 유예 카운트다운(출발 확정·게이트 해제 후에만 감소).
         if self.green_started and not gated and self.start_straight_remaining > 0:
             self.start_straight_remaining -= 1
+        # 출발 킥스타트 구간: 초록불 출발 후(빨간불 아님) 잔여가 남아 있으면,
+        # 조향 없이(trim) 고정 throttle 로 직진 출발한다(정지마찰 극복). 빨간불이면
+        # 잔여를 소진하지 않고 대기(정지 우선).
+        kicking = (self.green_started and not gated
+                   and not self.red_stopped
+                   and self.start_kick_remaining > 0)
         committing = (self.turn_intent is not None and self.fork_remaining > 0
                       and not gated)
         if committing:
@@ -265,18 +339,24 @@ class DrivingPolicy:
         curv = abs(lane.curvature) if lane.valid else 0.0
         self.corner_hold = max(self.corner_hold * p['curve_hold_decay'], curv)
 
-        # --- throttle 우선순위: 출발게이트 > 빨간불 > 분기 > 커브 > 로스트 > 순항 ---
+        # --- throttle 우선순위: 출발게이트 > 빨간불 > 킥스타트 > 분기 > 로스트 > 조향 > 커브 > 순항 ---
         if p['require_green_start'] and not self.green_started:
             steer = trim          # 출발 전 중립 유지
             throttle = 0.0
         elif self.red_stopped:
             throttle = 0.0        # 도착 빨간불 하드 정지
+        elif kicking:
+            steer = trim          # 킥스타트: 조향 없이 직진
+            throttle = p['start_kick_throttle']
+            self.start_kick_remaining -= 1
         elif committing:
             throttle = p['turn_throttle']
-        elif self.corner_hold >= p['corner_curvature_threshold']:
-            throttle = p['corner_throttle']
         elif not lane.valid:
             throttle = p['lane_lost_throttle']
+        elif abs(steer - trim) >= p['steer_throttle_threshold']:
+            throttle = p['steer_throttle']   # 조향 중(바퀴 꺾는 중) 감속
+        elif self.corner_hold >= p['corner_curvature_threshold']:
+            throttle = p['corner_throttle']
         else:
             throttle = p['cruise_throttle']
 
@@ -291,4 +371,5 @@ class DrivingPolicy:
             'turn_intent': self.turn_intent,
             'fork_remaining': self.fork_remaining,
             'corner_hold': round(self.corner_hold, 3),
+            'start_kick_remaining': self.start_kick_remaining,
         }

@@ -6,13 +6,13 @@
 
 본문(0~11)은 작업 가이드이고, **패키지별 상세 레퍼런스**(빌드 타입·실행 노드·의존성·data_files·메시지 필드·토픽 발행/구독 표·데이터 흐름도)는 **부록 E**에 정리되어 있습니다. 특정 패키지·토픽·메시지의 정확한 정의가 필요할 때 부록 E를 참조하세요.
 
-> **최근 진행 사항 (Vision):** YOLO26n 학습 완료 + **`inference` 패키지 신설·빌드 완료(골격 신설·단위 테스트 통과, 온디바이스 엔드투엔드 검증은 보드에서 재확인 대기)**되어, 이슈 8.1의 *모델 형식 결정·추론 노드 부재*는 해소되었습니다(YOLO26n/ONNX 통일, `test19.h5` 폐기). `/camera/image/compressed → YOLO26n(ONNX) → /control` 경로가 배선돼 있습니다. **주행 정책도 상당 부분 구현**되었습니다: 차선 추종 조향(PD+슬루+차선로스트 폴백), 출발 초록불 게이팅(B.1), 좌/우 갈림길 분기(B.3, `turn_intent` 래치+margin 게이팅), 도착 빨간불 하드 정지(B.6), 초록불 확정 후 `cruise_throttle`(launch 기본 0.18) 순항까지 `inference_node`에 들어갔습니다. **차선 신호 배선은 완료**입니다: `opencv_node`가 `auto_driving.launch.py`에 포함(6노드)되어 `/lane/offset`을 발행하고 `inference_node`가 구독합니다. 커브 감속(B.2)도 코드상 활성입니다: throttle 감속(`corner_hold→corner_throttle`)에 더해 곡률 피드포워드 조향(`curve_ff`, `sim_line_260707_fix.py`에서 이식)까지 들어가 있어 **실차 튜닝만 남았습니다**. **남은 미완은 ArUco 동적 장애물(B.4)·회전 교차로(B.5)·온디바이스 엔드투엔드 검증**입니다. 상세는 8.1 및 10.2를 참조하세요.
+> **최근 진행 사항 (Vision):** YOLO26n 학습 완료 + **`inference` 패키지 신설·빌드 완료(골격 신설·단위 테스트 통과, 온디바이스 엔드투엔드 검증은 보드에서 재확인 대기)**되어, 이슈 8.1의 *모델 형식 결정·추론 노드 부재*는 해소되었습니다(YOLO26n/ONNX 통일, `test19.h5` 폐기). `/camera/image/compressed → YOLO26n(ONNX) → /control` 경로가 배선돼 있습니다. **주행 정책도 상당 부분 구현**되었습니다: 차선 추종 조향(PD+슬루+차선로스트 폴백), 출발 초록불 게이팅(B.1), 좌/우 갈림길 분기(B.3, `turn_intent` 래치+margin 게이팅), 도착 빨간불 하드 정지(B.6), 초록불 확정 후 `cruise_throttle`(launch 기본 0.18) 순항까지 `inference_node`에 들어갔습니다. **차선 신호 배선은 완료**입니다: `opencv_node`가 `auto_driving.launch.py`에 포함(6노드)되어 `/lane/offset`을 발행하고 `inference_node`가 구독합니다. 커브 감속(B.2)도 코드상 활성입니다: throttle 감속(`corner_hold→corner_throttle`)에 더해 곡률 피드포워드 조향(`curve_ff`, `sim_line_260707_fix.py`에서 이식)까지 들어가 있어 **실차 튜닝만 남았습니다**. **ArUco 동적 장애물(B.4)도 구현·배선 완료**입니다: `inference/aruco_detect.py`(cv2.aruco 3중 게이팅 검출)+`inference/aruco_stop_policy.py`(비대칭 히스테리시스 정지/재출발 상태머신)를 신설하고 `inference_node`에 배선해, 규정 마커(DICT_6X6_50/ID=3) 등장 시 throttle 0.0 하드 정지·소멸 시 재출발합니다(순수 로직 단위 테스트 6 PASS + cv2.aruco 스모크 검증 완료, 온디바이스 엔드투엔드만 대기). **남은 미완은 회전 교차로(B.5)·온디바이스 엔드투엔드 검증**입니다. 상세는 8.1 및 10.2를 참조하세요.
 
 ---
 
 ## 0. 가장 먼저 알아야 할 것 (Quick Start for Claude Code)
 
-1. **자율주행 "인식"에 더해 "주행 정책"도 대부분 구현됐습니다.** `inference` 패키지가 `/control` 발행자로 동작하며(YOLO26n/ONNX), 차선 추종 조향·출발 초록불 게이팅·좌/우 갈림길 분기·도착 빨간불 정지·순항 throttle(launch 기본 0.18)이 들어가 있습니다. 차선 신호 배선(`opencv_node`→`/lane/offset`→`inference_node`)과 커브 감속(B.2, throttle 감속 + `curve_ff` 예측 조향) 모두 코드상 완료·활성입니다. 남은 핵심 작업은 **① ArUco 동적 장애물 정지/재출발(B.4), ② 회전 교차로(B.5), ③ 실차 튜닝·온디바이스 엔드투엔드 검증(커브 감속·`curve_ff` 포함)**입니다. → 8.1 / 10.2 참조.
+1. **자율주행 "인식"에 더해 "주행 정책"도 대부분 구현됐습니다.** `inference` 패키지가 `/control` 발행자로 동작하며(YOLO26n/ONNX), 차선 추종 조향·출발 초록불 게이팅·좌/우 갈림길 분기·도착 빨간불 정지·순항 throttle(launch 기본 0.18)이 들어가 있습니다. 차선 신호 배선(`opencv_node`→`/lane/offset`→`inference_node`)과 커브 감속(B.2, throttle 감속 + `curve_ff` 예측 조향), ArUco 동적 장애물 정지/재출발(B.4) 모두 코드상 완료·활성입니다. 남은 핵심 작업은 **① 회전 교차로(B.5), ② 실차 튜닝·온디바이스 엔드투엔드 검증(커브 감속·`curve_ff`·ArUco 포함)**입니다. → 8.1 / 10.2 참조.
 2. **빌드 순서가 정해져 있습니다.** 메시지 패키지가 단방향 의존을 가지므로 인터페이스 계층을 먼저 빌드해야 합니다. → 6번 참조.
 3. **토픽명 슬래시(`/`) 불일치 가능성**이 있습니다. 파라미터 기본값과 `vehicle_config.yaml`이 다릅니다. 토픽 관련 작업 시 반드시 확인하세요. → 8.2 참조.
 4. **완주 안정성 > 속도.** Lab-Time 페널티(대부분 +30s)가 순주행 시간보다 큰 경우가 많습니다. → 9번 설계 원칙 참조.
@@ -111,7 +111,7 @@ ros2 launch control auto_driving.launch.py
 
 현재 워크스페이스에는 다음 이슈가 있습니다. 관련 영역을 건드릴 때 반드시 고려하세요.
 
-### 8.1 자율주행 추론 경로 (패키지·인식·주행 정책 대부분 완료 → ArUco/교차로/배선 잔여)
+### 8.1 자율주행 추론 경로 (패키지·인식·주행 정책·ArUco 완료 → 교차로·온디바이스 검증 잔여)
 - (해결됨) `auto_driving.launch.py`가 참조하던 **`inference_node`·`test19.h5`** 부재 문제는 해소되었습니다. `inference` 패키지를 신설하고 런치의 모델 참조를 `models/best.onnx`로 교체·빌드·검증했습니다. **`/control` 발행자 존재.**
 
 **진행 상황 (2026 갱신):**
@@ -123,16 +123,18 @@ ros2 launch control auto_driving.launch.py
   - **출발 초록불 게이팅(B.1)** — `require_green_start`(기본 True): 초록불 확정 전까지 조향 중립·throttle 0.0, 확정 시 `started` 래치 후 순항.
   - **좌/우 갈림길 분기(B.3)** — 표지판 확정 시 `turn_intent` 래치 + margin 게이팅(`sign_margin`/`sign_conf`) + `turn_bias` 조향 편향. 역방향 트랙은 `drive_direction`으로 미러링.
   - **도착 빨간불 하드 정지(B.6)** — 빨간불 확정 시 항상 throttle 0.0으로 덮어씀.
+  - **ArUco 동적 장애물 정지/재출발(B.4)** — `aruco_detect.py`(cv2.aruco 검출 + target_ids/ROI/min_area_ratio **3중 게이팅**)로 규정 마커(DICT_6X6_50/ID=3) 존재를 판정하고, `aruco_stop_policy.py`(비대칭 히스테리시스: 정지 진입 민감 `aruco_stop_confirm_frames`=2 / 재출발 보수 `aruco_clear_confirm_frames`=6)로 확정. 정지 시 `control_tick`이 throttle 0.0으로 하드 덮어씀(빨간불과 동일 최우선). 상세는 **10.2**.
   - **순항 throttle** — 출발 후 `cruise_throttle` 고정(launch 기본 **0.18**; driving_policy 코드 기본 0.13).
 
 **완료된 배선 (과거 TODO → 코드 실측으로 해소):**
-- ✅ **차선 신호 배선 완료** — `opencv_node`가 `auto_driving.launch.py`에 포함(camera/control/joystick/battery/**opencv**/inference **6노드**)되어 `/lane/offset`을 발행하고, **구독측 `inference` 패키지도 신설·존재**(`src/inference/`: `yolo_onnx.py`/`inference_node.py`/`driving_policy.py`)하여 이를 구독한다. 발행·구독 양측 배선이 모두 실재한다. 차선 검출은 **BEV(조감도) → 히스토그램(출발점) → 슬라이딩 윈도우 → 2차 함수 적합** 방식으로 곡선·직선을 모두 인식한다(옛 Hough/밴드무게중심 방식 폐기 — 상세·정정은 10번). 프로파일 기본값은 대회 규정 트랙 `white_track`(brightness/light), 연습 트랙은 `lane_profile:=orange_track`. 상세·프로파일·정규화는 **10번** 참조.
+- ✅ **ArUco 동적 장애물(B.4) 배선 완료** — `src/inference/inference/aruco_detect.py`·`aruco_stop_policy.py` 신설, `inference_node`가 `image_callback`에서 YOLO와 독립적으로 프레임마다 `obstacle_present()`→`ArucoStopPolicy.update()`를 돌려 정지 여부를 래치하고 `control_tick`이 정지 시 throttle을 0.0으로 덮어쓴다. 검출기 생성 실패 시 안전하게 ArUco 비활성(degraded)로 기동. 파라미터(`aruco_*` 7종)는 `auto_driving.launch.py`에 노출. 상세는 **10.2**.
+- ✅ **차선 신호 배선 완료** — `opencv_node`가 `auto_driving.launch.py`에 포함(camera/control/joystick/battery/**opencv**/inference **6노드**)되어 `/lane/offset`을 발행하고, **구독측 `inference` 패키지도 신설·존재**(`src/inference/`: `yolo_onnx.py`/`inference_node.py`/`driving_policy.py`/`aruco_detect.py`/`aruco_stop_policy.py`)하여 이를 구독한다. 발행·구독 양측 배선이 모두 실재한다. 차선 검출은 **BEV(조감도) → 히스토그램(출발점) → 슬라이딩 윈도우 → 2차 함수 적합** 방식으로 곡선·직선을 모두 인식한다(옛 Hough/밴드무게중심 방식 폐기 — 상세·정정은 10번). 프로파일 기본값은 대회 규정 트랙 `white_track`(brightness/light), 연습 트랙은 `lane_profile:=orange_track`. 상세·프로파일·정규화는 **10번** 참조.
    - ⚠️ **8.2(토픽 슬래시 불일치)와 맞물리는 검증 포인트**: `opencv_node`가 발행하는 차선 토픽명(`lane_offset_topic` 기본값 `/lane/offset`)과 `inference_node`의 `lane_offset_topic` 기본값(`/lane/offset`)이 **양쪽에서 정확히 일치**해야 함. 8.2의 절대/상대(슬래시 有/無) 표기 불일치가 재발하면 — 예: 한쪽 `/lane/offset`, 다른 쪽 `lane/offset`(네임스페이스 상대) — **두 노드가 정상 기동해도 토픽이 연결되지 않아 조향이 계속 중립 유지**된다. 발행/구독 자체는 에러 없이 떠서 원인 파악이 특히 어렵다. **결론: 절대표기 `/lane/offset`으로 통일**(10번 "토픽명 슬래시 표기 최종 통일안"). 보드 실행 시 `ros2 topic info /lane/offset`로 pub/sub 연결을 확인할 것.
 
 **남은 작업:**
-1. **동적 장애물** — ArUco 마커 정지/재출발 상태 머신(B.4). YOLO가 아니라 별도 OpenCV `cv2.aruco` 경로로 구현. (→ 부록 D) **미구현.**
+1. ~~**동적 장애물(B.4)**~~ — ✅ **구현·배선 완료**. ArUco 마커 정지/재출발 상태 머신을 별도 OpenCV `cv2.aruco` 경로로 구현(`aruco_detect.py`+`aruco_stop_policy.py`, `inference_node` 배선). 순수 상태머신 단위 테스트 6 PASS + cv2.aruco 스모크 검증(ID/ROI/면적 게이팅 4/4) 완료. **남은 것은 실차 튜닝(ROI·min_area_ratio·confirm frame)과 온디바이스 엔드투엔드 검증뿐**(→ 아래 3, 10.2). ⚠️ 마커 사양(DICT_6X6_50/ID=3)은 sim 파일의 "실측 확정" 근거를 채택했으므로 실제 대회 마커와 1회 대조 권장(다르면 `aruco_dict`/`aruco_target_ids` launch 인자로 즉시 교체).
 2. **회전 교차로(B.5)** — 원형 궤적 추종 + 1바퀴 카운팅 + 탈출 분기. **미구현.**
-3. **온디바이스 엔드투엔드 검증** — 개발 박스엔 rclpy/cv2/onnxruntime 부재라 주행 정책 순수 로직만 단위 테스트 통과. 보드에서 onnxruntime 설치 후 ONNX 추론·카메라 디코드·`/control` 발행 엔드투엔드 재검증 필요(10.2).
+3. **온디바이스 엔드투엔드 검증** — 개발 박스엔 rclpy/onnxruntime 부재라 주행 정책·ArUco 순수 로직만 단위 테스트 통과(cv2는 개발 박스에 5.0.0 존재해 ArUco 검출은 스모크 검증됨). 보드에서 onnxruntime 설치 후 ONNX 추론·카메라 디코드·`/control` 발행·ArUco 정지/재출발 엔드투엔드 재검증 필요(10.2).
 
 > **커브 감속(B.2) 상태 정정(2026-07)**: 과거 문서는 "커브 감속이 `curve_slow` param만 있고 코드 비활성"이라 서술했으나 **코드 실측 결과 이는 사실이 아니다.** `driving_policy.py::step()`은 `corner_hold`(=`|curvature|`의 감쇠 최댓값)가 `corner_curvature_threshold`(launch 기본 0.12) 이상이면 throttle 을 `corner_throttle`(0.17)로 낮추는 **커브 감속이 이미 활성**이다(옛 설계 이름 `curve_slow` 는 코드에 존재하지 않음). 추가로 `sim_line_260707_fix.py` 에서 **곡률 피드포워드 조향 `curve_ff`(기본 0.30)** 를 이식해, 다가오는 커브 곡률에 비례해 앞바퀴를 미리 꺾는다(`step()`의 `lane_effort` 에 `steer_sign*curve_ff*curvature` 항). 즉 B.2 커브 대응은 **감속(throttle) + 예측 조향(steering) 양쪽 다 활성**이며, 남은 것은 실차 튜닝뿐이다.
 
@@ -185,7 +187,7 @@ ros2 launch control auto_driving.launch.py
   colcon build              # 나머지 기능 패키지 (inference 포함)
   source install/setup.bash
   ```
-- 자율주행 launch 명령·인자: `ros2 launch control auto_driving.launch.py` (인자 `model_path` 기본값 = 배포 onnx, 10.1). ※ inference 노드 구현 완료(아래 10.2). 주행 정책은 대부분 구현됨(차선 추종 조향·초록불 게이팅·갈림길 분기·빨간불 정지·순항 throttle·커브 감속(throttle)·`curve_ff` 예측 조향·차선 배선) — ArUco 동적 장애물·회전 교차로·실차 튜닝·온디바이스 검증만 잔여(8.1 TODO).
+- 자율주행 launch 명령·인자: `ros2 launch control auto_driving.launch.py` (인자 `model_path` 기본값 = 배포 onnx, 10.1). ※ inference 노드 구현 완료(아래 10.2). 주행 정책은 대부분 구현됨(차선 추종 조향·초록불 게이팅·갈림길 분기·빨간불 정지·순항 throttle·커브 감속(throttle)·`curve_ff` 예측 조향·차선 배선·ArUco 동적 장애물 정지/재출발) — 회전 교차로·실차 튜닝·온디바이스 검증만 잔여(8.1 TODO).
 - 5종 모니터 토픽 목록: `/camera/image/compressed`, `/opencv/image/{grayscale,blur,edge}`, `/joystick`, `/control`, `/battery_status` (부록 E.4).
 - 토픽명 슬래시 표기 최종 통일안 (8.2 결론): **차선 토픽은 절대표기 `/lane/offset`으로 통일**(발행자 `opencv_node`의 `lane_offset_topic` 기본값 = `/lane/offset`, 문서상 구독자 `inference_node`의 `lane_offset_topic` 기본값도 `/lane/offset` — 양쪽 이미 일치, 슬래시 有). config의 `IMAGE_TOPIC`/`CONTROL_TOPIC`/`JOYSTICK_TOPIC`/`BATTERY_TOPIC`도 전부 슬래시 有(절대표기)이므로 **절대표기로 통일**을 결론으로 확정. ⚠️ `opencv_node`를 실행할 때 `lane_offset_topic`을 상대표기(`lane/offset`)로 오버라이드하면 네임스페이스가 붙어 구독자와 어긋나므로 절대표기 유지. (그 외 파라미터 기본값 `battery_status`/`joystick` 상대표기는 별개 항목 — config 로드 시 절대표기로 덮임, 8.2)
 - ✅ (2026-07 코드 실측 확정) **`opencv_node`는 `auto_driving.launch.py`에 포함**됨(camera/control/joystick/battery/opencv/inference **6노드**). `/lane/offset` 발행측 배선 완료.
@@ -254,9 +256,9 @@ ros2 launch control auto_driving.launch.py
 ### 10.2 inference 패키지 · 온디바이스 런타임 (골격 신설 — 온디바이스 검증 대기)
 
 > **실제 구현 상태(2026-07 갱신)**: 이 절의 아래 "온디바이스 검증 완료" 서술 중 상당수는 이전엔 **문서 선반영(패키지가 실제로 부재)**이었다. 이번에 **패키지 골격을 신설**했다:
-> - 파일: `inference/yolo_onnx.py`(letterbox+ONNX 추론+`(1,300,6)` 파싱, 무거운 import 지연·모델/런타임 부재 시 `RuntimeError`), `inference/inference_node.py`(config 로드→카메라/차선 구독→검출 래치→control timer(기본 20Hz)로 `/control` 발행, 모델 부재 시 **degraded 정지 모드**), **`inference/driving_policy.py`(순수 상태 머신)**, `test/test_driving_policy.py`(7 PASS), 표준 ament_python 빌드 파일.
-> - **launch 정합**: `auto_driving.launch.py`가 넘기는 18개 param을 노드가 전부 declare(총 27개, superset) — 확인 완료.
-> - **검증 범위**: 개발 박스에 rclpy/cv2/onnxruntime 부재 → **순수 주행 정책 로직만 단위 테스트 통과**. ONNX 추론·카메라 디코드·`/control` 발행 엔드투엔드는 **보드에서 재검증 필요**(아래 런타임 설치 후). 모델 `models/best.onnx`가 없으면 노드는 안전하게 정지 모드로 뜬다.
+> - 파일: `inference/yolo_onnx.py`(letterbox+ONNX 추론+`(1,300,6)` 파싱, 무거운 import 지연·모델/런타임 부재 시 `RuntimeError`), `inference/inference_node.py`(config 로드→카메라/차선 구독→검출 래치→control timer(기본 20Hz)로 `/control` 발행, 모델 부재 시 **degraded 정지 모드**), **`inference/driving_policy.py`(순수 상태 머신)**, **`inference/aruco_detect.py`(cv2.aruco 검출)·`inference/aruco_stop_policy.py`(순수 정지/재출발 상태머신)**, `test/test_driving_policy.py`(17 PASS)·`test/test_aruco_stop_policy.py`(6 PASS), 표준 ament_python 빌드 파일.
+> - **launch 정합**: `auto_driving.launch.py`가 넘기는 param을 노드가 전부 declare(superset) — ArUco param 7종 포함, 확인 완료.
+> - **검증 범위**: 개발 박스에 rclpy/onnxruntime 부재 → **순수 로직(주행 정책·ArUco 상태머신)만 단위 테스트 통과**. cv2 5.0.0은 개발 박스에 존재해 **ArUco 검출(aruco_detect)은 합성 마커로 스모크 검증 완료**(ID/ROI/면적 게이팅 4/4). ONNX 추론·카메라 디코드·`/control` 발행 엔드투엔드는 **보드에서 재검증 필요**(아래 런타임 설치 후). 모델 `models/best.onnx`가 없으면 노드는 안전하게 정지 모드로 뜬다.
 > - 아래 "런타임/출력 레이아웃/param" 항목은 보드 재현·검증 시의 목표 사양으로 읽을 것.
 
 - **런타임(보드 설치 필요, aarch64 / Python 3.10):**
@@ -266,17 +268,19 @@ ros2 launch control auto_driving.launch.py
 - **ONNX 출력 레이아웃(실모델로 검증):** 입력 `images (1,3,640,640) float`, 출력 `output0 (1,300,6)`. 6값 순서 = **`[x1, y1, x2, y2, score, class_id]`** (좌표는 letterbox된 640 스케일, score 내림차순 정렬·NMS-free). Netron 없이 확인 완료 → `inference/yolo_onnx.py` 파싱과 일치.
 - **패키지 구조** (`src/inference/`, ament_python):
   - `inference/yolo_onnx.py` — letterbox 전처리 + onnxruntime 추론 + `(1,300,6)` 파싱(`Detection` dataclass 반환).
-  - `inference/inference_node.py` — 카메라 구독 → 추론 → 시간적 필터(9.5) → 주행 정책(차선 추종 조향 + 출발 게이팅 + 갈림길 분기 + 빨간불 정지) → `/control` 발행. 차선 신호는 `/lane/offset` 구독, 인식 결과 디버그는 `/inference/detections`(JSON) 발행.
+  - `inference/inference_node.py` — 카메라 구독 → 추론 → 시간적 필터(9.5) → 주행 정책(차선 추종 조향 + 출발 게이팅 + 갈림길 분기 + 빨간불 정지 + **ArUco 장애물 정지**) → `/control` 발행. 차선 신호는 `/lane/offset` 구독, 인식 결과 디버그는 `/inference/detections`(JSON) 발행.
+  - `inference/aruco_detect.py` — **ArUco 장애물 검출(B.4, cv2.aruco 의존)**. `create_detector`(신 API `getPredefinedDictionary`+`ArucoDetector`)/`detect_markers`/`obstacle_present`(target_ids·ROI·min_area_ratio 3중 게이팅). 순수 cv2(ROS 비의존)라 `lane_detect.py`와 같은 계층.
+  - `inference/aruco_stop_policy.py` — **ArUco 정지/재출발 상태머신(순수 로직)**. `ArucoStopPolicy.update(present)→allow`. 비대칭 히스테리시스(정지 진입 민감 / 재출발 보수). `driving_policy.py`와 같은 계층. `test/test_aruco_stop_policy.py`(6 PASS).
   - `setup.cfg` 필수(스크립트를 `lib/inference/`로 설치, `ros2 run` 인식). 누락 시 `bin/`에 설치돼 "No executable found" 발생.
 - **주요 ROS param(기본값):** `model_path`(=배포 onnx), `imgsz=640`, `conf_threshold=0.25`, `confirm_frames=3`(분기류), `stop_confirm_frames=2`(정지류·빨간불 우선), `cruise_throttle`(**초록불 확정 후 순항 throttle**; 확정 전·빨간불 시 0.0) — driving_policy 코드 기본은 **0.13**이나 launch `auto_driving.launch.py`가 인자 기본값 **0.18**로 덮어씀(→ `ros2 launch`로 실행 시 **실제 순항값 0.18**), `drive_direction=1.0`(역방향 트랙 시 -1.0로 좌/우 미러링). 토픽·`STEER_TRIM`은 `vehicle_config.yaml`에서 로드.
 - **엔드투엔드 검증(보드에서 재확인할 목표 시나리오 — 개발 박스에선 미실행):** 합성 이미지 → cv2 디코드 → ONNX 추론 → `/control` 발행(초록불 미확정 상태라 `steering=STEER_TRIM` 중립, `throttle=0.0` — 출발 게이트 동작 기대). 초록불 확정 후에는 `cruise_throttle`(launch 기본 0.18)로 순항. ※ 개발 박스엔 rclpy/cv2/onnxruntime 부재라 **주행 정책 순수 로직만 단위 테스트 통과**했고, 이 엔드투엔드 경로는 보드에서 재검증 대상.
 - **주행 정책 관련 param(기본값):** `require_green_start=True`(B.1 게이트), `sign_margin=0.15`/`sign_conf=0.35`(좌/우 게이팅 B.3), `steer_kp=0.6`/`steer_kd=0.15`(차선 PD), `curve_ff=0.30`(**곡률 피드포워드 조향** — 다가오는 커브를 미리 꺾음, `sim_line_260707_fix.py`서 이식), `steer_sign=-1.0`(배선 극성; launch 값)/`steer_slew=0.15`(슬루), `turn_bias=0.7`(분기 편향; launch 값), `corner_throttle=0.17`/`corner_curvature_threshold=0.12`/`curve_hold_decay=0.85`(**커브 감속 활성** — `corner_hold`가 임계 이상이면 throttle을 corner_throttle로 낮춤), `lane_offset_topic=/lane/offset`. ※ 옛 문서의 `curve_slow` param 은 코드에 존재하지 않음(위 corner_* 메커니즘이 그 역할).
 - **배선 완료(과거 TODO 해소):** `opencv_node`가 `auto_driving.launch.py`에 포함(6노드)되어 `/lane/offset`을 발행하고 `inference_node`가 구독 — 발행·구독 배선 실재.
 - **커브 감속(B.2) — 활성(정정):** `step()`이 `corner_hold`(=`|curvature|` 감쇠 최댓값)≥`corner_curvature_threshold`(0.12)면 throttle을 `corner_throttle`(0.17)로 낮춘다. 추가로 `curve_ff`(0.30) 곡률 피드포워드 조향까지 활성. 옛 문서의 "compute_control 비활성"·`curve_slow` 서술은 코드와 불일치였고 정정함. 남은 것은 실차 튜닝.
+- **ArUco 동적 장애물(B.4) — 구현·배선 완료:** `image_callback`이 YOLO와 독립적으로 매 프레임 `aruco_detect.obstacle_present()`(3중 게이팅)→`ArucoStopPolicy.update()`를 돌려 `self._aruco_blocked`(락 보호)를 갱신하고, `control_tick`이 정지 시 throttle을 0.0으로 하드 덮어쓴다(빨간불과 동일 최우선). 검출기는 지연 import + try/except로 실패 시 ArUco 비활성(degraded)로 안전 기동. **ArUco param(기본값):** `aruco_enabled=True`, `aruco_dict='DICT_6X6_50'`, `aruco_target_ids=[3]`(빈 배열=아무 마커나), `aruco_min_area_ratio=0.0`(거리 무관), `aruco_roi_norm=[0.2,0.4,0.8,1.0]`(하단 60%·가로중앙 60%, 빈 배열=전체 화면), `aruco_stop_confirm_frames=2`(정지 진입 민감)/`aruco_clear_confirm_frames=6`(재출발 보수). ctrl 로그에 `aruco_stop` 상태 출력. 남은 것은 실차 튜닝·온디바이스 검증·마커 사양 대조(8.1 남은 작업 1).
 - **미완(8.1 TODO, 코드에 표기):**
-  - **ArUco 동적 장애물(B.4)** — 정지·재출발 상태 머신 미구현(`cv2.aruco` 별도 경로).
   - **회전 교차로(B.5)** — 미구현.
-  - **온디바이스 엔드투엔드 검증** — 보드에서 onnxruntime 설치 후 ONNX 추론·`/control` 발행 재검증 필요.
+  - **온디바이스 엔드투엔드 검증** — 보드에서 onnxruntime 설치 후 ONNX 추론·`/control` 발행·ArUco 정지/재출발 재검증 필요.
   - ⚠️ **안정화 순서**: 커브 감속·`curve_ff`는 코드상 활성이므로 **① 실트랙에서 커브 대응 검증(ctrl 로그 `curv`/`corner_hold`) → ② `cruise_throttle`(launch 기본 0.18) 순항 신뢰** 순. 오프라인 선(先)튜닝은 `tools/lane_tuning_harness.py`. 상세는 8.1 잔여 작업의 "안정화 순서".
 
 ### 10.3 Vision 학습 파이프라인 (재현용 메모)
@@ -336,6 +340,7 @@ ros2 launch control auto_driving.launch.py
 - 원칙: **장애물 등장 시 정지, 퇴거 시 출발**. 차 정지 시 **스탑워치 일시정지**, 사라지면 **재개**.
 - 페널티: 차선 이탈 **+30s** / 미션 실패 시 **미션 시작지점 재출발**.
 - 구현: ArUco 검출 기반 정지/재출발 상태 머신. 정지는 보수적으로, 재출발은 마커 소멸 확인 후. *정지 중 시간 손해 없음 → 충돌·이탈 회피 우선.* ※ ArUco는 YOLO26n 학습 대상이 아니며 OpenCV `cv2.aruco`로 별도 검출.
+- ✅ **구현 완료**: `inference/aruco_detect.py`(3중 게이팅 검출)+`inference/aruco_stop_policy.py`(비대칭 히스테리시스 정지/재출발)로 구현·`inference_node` 배선. 정지 시 throttle 0.0 하드 덮어씀. 상세·파라미터는 8.1 / 10.2. 남은 것은 실차 튜닝·온디바이스 검증·마커 사양 대조.
 
 ### B.5 회전 교차로 (Option / In 코스)
 - **1회 이상 회전 후 탈출**. 차선 이탈 시 **미션 실패 + 차선 이탈 동시 적용**. **미션 포기 불가**.
@@ -368,7 +373,7 @@ ros2 launch control auto_driving.launch.py
   3. 좌회전 표지판 (`left_sign`, id 2)
   4. 우회전 표지판 (`right_sign`, id 3)
 - 클래스 id 매핑은 10.1을 정본으로 함.
-- 별도로 동적 장애물용 **ArUco 마커** 검출 필요(YOLO 아님, OpenCV `cv2.aruco`).
+- 별도로 동적 장애물용 **ArUco 마커** 검출 필요(YOLO 아님, OpenCV `cv2.aruco`). ✅ **구현 완료**(`inference/aruco_detect.py`, DICT_6X6_50/ID=3 기본 — 8.1/10.2).
 
 ---
 
@@ -389,8 +394,10 @@ src/
 ├── control/        [ament_python]  control/control_node.py
 │   └── launch/{auto_driving,manual_driving}.launch.py
 ├── control_msgs/   [ament_cmake]   msg/Control.msg
-├── inference/      [ament_python]  inference/inference_node.py, inference/yolo_onnx.py, inference/driving_policy.py
+├── inference/      [ament_python]  inference/inference_node.py, inference/yolo_onnx.py, inference/driving_policy.py, inference/aruco_detect.py, inference/aruco_stop_policy.py
 │                                     ↳ driving_policy.py: 순수 주행 정책(ROS/cv2 비의존) — 출발게이트/빨간불정지/좌우분기(margin)/차선PD+로스트폴백/커브감속. test/test_driving_policy.py.
+│                                     ↳ aruco_detect.py: ArUco 장애물 검출(B.4, cv2.aruco) — 3중 게이팅(ID/ROI/면적)으로 obstacle_present. lane_detect.py와 같은 계층.
+│                                     ↳ aruco_stop_policy.py: ArUco 정지/재출발 상태머신(순수 로직) — 비대칭 히스테리시스. test/test_aruco_stop_policy.py.
 ├── joystick/       [ament_python]  joystick/joystick_node.py
 ├── joystick_msgs/  [ament_cmake]   msg/Joystick.msg
 ├── monitor/        [ament_python]  monitor/monitor_node.py  (+ templates/ static/)
