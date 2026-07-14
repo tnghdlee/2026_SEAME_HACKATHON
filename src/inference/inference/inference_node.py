@@ -5,19 +5,32 @@
     /lane/offset ────────────────────────────────► DrivingPolicy ─┴─► /control
                                                                     └─► /inference/detections(JSON, 디버그)
 
-- 검출은 카메라 콜백(YOLO rate ≈3Hz)에서 policy.on_detections 로 래치 갱신.
+- 검출은 카메라 콜백(YOLO rate ≈1~3Hz)에서 policy.on_detections 로 래치 갱신.
 - 조향/스로틀은 control timer(control_hz, 기본 20Hz)에서 policy.step(lane) 으로 발행.
 - 모델/런타임 부재 시 degraded 모드: 검출 없이 정지(throttle 0)·중립 조향 유지.
+
+⚠️ 동시성(중요): YOLO ONNX 추론은 보드 CPU 에서 프레임당 수백 ms 로 느리다. 이를
+   control timer 와 같은 단일 스레드(rclpy.spin)에서 돌리면 추론이 타이머를 굶겨
+   /control 이 실측 ~1Hz 로 떨어진다(bagfile 확인). 조향 명령이 초당 1회면 차선을
+   따라갈 수 없다. 그래서 MultiThreadedExecutor + 콜백 그룹으로 분리한다:
+     - image_callback(느린 추론)  : 전용 그룹(중복 추론 방지, MutuallyExclusive).
+     - control_tick(20Hz 조향)     : 별도 전용 그룹 → 추론과 무관하게 정시 실행.
+     - lane_callback              : 별도 그룹.
+   공유 상태(policy, self.lane)는 self._lock 으로 보호하되, 느린 추론은 락 밖에서
+   실행해 타이머를 막지 않는다(락 구간은 on_detections/step 등 수 μs 로직뿐).
 
 토픽·STEER_TRIM 은 vehicle_config.yaml 에서 로드(절대표기 통일, CLAUDE.md 8.2/10).
 차선 토픽 기본값은 절대표기 /lane/offset (발행자 opencv_node 와 일치).
 """
 import json
 import os
+import threading
 from pathlib import Path
 
 import rclpy
 import yaml
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile,
                        ReliabilityPolicy)
@@ -138,6 +151,8 @@ class InferenceNode(Node):
         })
         self.policy = DrivingPolicy(params)
         self.lane = LaneSignal(offset=0.0, valid=False, curvature=0.0)
+        # 공유 상태(policy/self.lane) 보호. 느린 추론은 이 락 밖에서 실행한다.
+        self._lock = threading.Lock()
 
         # 모델 로드 — 실패 시 degraded 모드(정지).
         self.model = None
@@ -154,10 +169,18 @@ class InferenceNode(Node):
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.VOLATILE,
         )
+        # 콜백 그룹 분리 → MultiThreadedExecutor 에서 각기 다른 스레드로 동시 실행.
+        # 느린 추론(image)이 20Hz 조향 타이머(control)를 굶기지 않게 한다.
+        self._img_group = MutuallyExclusiveCallbackGroup()   # 추론 중복 방지
+        self._ctrl_group = MutuallyExclusiveCallbackGroup()  # 정시 조향
+        self._lane_group = MutuallyExclusiveCallbackGroup()
+
         self.create_subscription(CompressedImage, image_topic,
-                                 self.image_callback, image_qos)
+                                 self.image_callback, image_qos,
+                                 callback_group=self._img_group)
         self.create_subscription(Float32MultiArray, lane_topic,
-                                 self.lane_callback, 10)
+                                 self.lane_callback, 10,
+                                 callback_group=self._lane_group)
 
         self.control_pub = self.create_publisher(Control, control_topic, 10)
         self.det_pub = None
@@ -165,7 +188,8 @@ class InferenceNode(Node):
             self.det_pub = self.create_publisher(String, self.detections_topic, 10)
 
         period = 1.0 / control_hz if control_hz > 0 else 0.05
-        self.timer = self.create_timer(period, self.control_tick)
+        self.timer = self.create_timer(period, self.control_tick,
+                                       callback_group=self._ctrl_group)
 
         self.get_logger().info(
             f'inference_node started: image_topic={image_topic}, '
@@ -200,13 +224,17 @@ class InferenceNode(Node):
             self.get_logger().warning('압축 이미지 디코드 실패')
             return
 
+        # 느린 추론은 락 밖에서 — control 타이머 스레드를 막지 않는다.
         try:
             dets = self.model.infer(frame)
         except Exception as exc:  # noqa: BLE001
             self.get_logger().warning(f'추론 실패(프레임 스킵): {exc}')
             return
 
-        self.policy.on_detections(dets)
+        # 정책 래치 갱신·상태 스냅샷은 락 안에서(수 μs).
+        with self._lock:
+            self.policy.on_detections(dets)
+            state = self.policy.state_summary()
 
         if self.det_pub is not None:
             payload = [
@@ -215,21 +243,27 @@ class InferenceNode(Node):
                 for d in dets
             ]
             msg_out = String()
-            msg_out.data = json.dumps(
-                {'detections': payload, 'state': self.policy.state_summary()})
+            msg_out.data = json.dumps({'detections': payload, 'state': state})
             self.det_pub.publish(msg_out)
 
     # ---- 차선 신호 저장 ----
     def lane_callback(self, msg: Float32MultiArray):
         data = list(msg.data)
         if len(data) >= 3:
-            self.lane = LaneSignal(offset=float(data[0]),
-                                   valid=bool(data[1] >= 0.5),
-                                   curvature=float(data[2]))
+            sig = LaneSignal(offset=float(data[0]),
+                             valid=bool(data[1] >= 0.5),
+                             curvature=float(data[2]))
+            with self._lock:
+                self.lane = sig
 
     # ---- 제어 rate: 정책 → /control ----
     def control_tick(self):
-        steer, throttle = self.policy.step(self.lane)
+        # 정책 계산·상태 스냅샷은 락 안에서(수 μs). 추론과 병렬로 정시 실행된다.
+        with self._lock:
+            lane = self.lane
+            steer, throttle = self.policy.step(lane)
+            st = self.policy.state_summary()
+
         out = Control()
         out.header.stamp = self.get_clock().now().to_msg()
         out.header.frame_id = 'inference'
@@ -242,11 +276,10 @@ class InferenceNode(Node):
         self._tick_log = getattr(self, '_tick_log', 0) + 1
         if self._tick_log >= int(self.control_hz):
             self._tick_log = 0
-            st = self.policy.state_summary()
             self.get_logger().info(
                 f'ctrl: steer={steer:+.3f} throttle={throttle:.3f} '
-                f'lane(valid={self.lane.valid} off={self.lane.offset:+.3f} '
-                f'curv={self.lane.curvature:+.3f}) corner_hold={st["corner_hold"]:.3f} '
+                f'lane(valid={lane.valid} off={lane.offset:+.3f} '
+                f'curv={lane.curvature:+.3f}) corner_hold={st["corner_hold"]:.3f} '
                 f'turn_intent={st["turn_intent"]} fork_remaining={st["fork_remaining"]} '
                 f'green={st["green_started"]} red={st["red_stopped"]}')
 
@@ -254,11 +287,16 @@ class InferenceNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = InferenceNode()
+    # 최소 3스레드: image(추론)·control(20Hz)·lane 이 각기 다른 스레드로 동시 실행.
+    # 단일 스레드면 느린 추론이 조향 타이머를 굶겨 /control 이 ~1Hz 로 떨어진다.
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
+        executor.shutdown()
         node.destroy_node()
         rclpy.shutdown()
 

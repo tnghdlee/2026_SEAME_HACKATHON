@@ -31,7 +31,7 @@ class OpenCvNode(Node):
         # --- 트랙 프로파일 (CLAUDE.md 10번) ---
         # 검출 특성이 반대인 두 트랙을 프리셋으로 보존. 기본은 대회 규정 트랙.
         #   white_track (기본, 대회): 검은 바닥 + 양쪽 흰 경계선
-        #       → method='brightness', polarity='light'
+        #       → method='white', polarity='light' (채도 게이팅 흰색 마스크)
         #   orange_track (연습): 회색 바닥 + 주황 라인
         #       → method='color', polarity='dark'
         # 아래 개별 param 을 '명시'하면 프리셋을 덮어쓴다(개별 param 우선).
@@ -43,6 +43,15 @@ class OpenCvNode(Node):
         # (method 가 'color' 로 해석될 때만 사용 — white_track 은 무시)
         self.declare_parameter('lane_hsv_lower', [5, 80, 80])
         self.declare_parameter('lane_hsv_upper', [22, 255, 255])
+        # 흰색 마스크(method='white', 대회 white_track 기본) 게이팅.
+        # inRange(hsv, (0,0,v_min), (180,s_max,255)) — 저채도·고명도만 흰색으로 통과.
+        # s_max 낮을수록 유채색(파란 매트) 배제 강함, v_min 높을수록 밝은 것만 통과.
+        # 기본값은 실트랙 bag HSV 실측 기준(흰 선 S≤12/V≥215, 파란 매트 S≥92,
+        # 노면 V≤118). s_max=50 은 [12,92], v_min=150 은 [118,215] 사이 마진값.
+        self.declare_parameter('lane_white_s_max', 50)
+        self.declare_parameter('lane_white_v_min', 150)
+        # True 면 흰색 마스크와 명암(brightness) 마스크를 AND 결합(기본 순수 흰색 단독).
+        self.declare_parameter('lane_white_combine', False)
         # 디노이즈 커널(형태학적 열림). <=1 이면 비활성.
         self.declare_parameter('morph_ksize', 3)
         # 적응형 임계값 이웃 창(brightness 경로). 해상도에 비례해 스케일할 것.
@@ -50,12 +59,14 @@ class OpenCvNode(Node):
         self.declare_parameter('blur_ksize', 5)
 
         # --- BEV 원근변환 4점(원본 폭/높이 대비 0~1 비율, 좌상→우상→우하→좌하) ---
-        # ⚠️ 실차 필수 캘리브레이션: 직선 구간에서 /opencv/image/lane 상 좌우 차선이
-        # 세로로 나란한 평행선이 되도록 상단 두 점(tl,tr)을 조정할 것.
-        self.declare_parameter('bev_src_tl', [0.20, 0.62])
-        self.declare_parameter('bev_src_tr', [0.80, 0.62])
-        self.declare_parameter('bev_src_br', [1.02, 1.00])
-        self.declare_parameter('bev_src_bl', [-0.02, 1.00])
+        # 실트랙 bag(track_full_20260714_082403)의 직선·중앙 구간(프레임 1380±)에서
+        # 차선 경계선을 추적·적합해 캘리브레이션한 값(대칭, 경계선을 BEV 15/85% 열에
+        # 배치 → 직선 차선이 조감도에서 세로 평행선, offset=0=카메라 중심축).
+        # ⚠️ 카메라 장착 위치/각도가 바뀌면 재캘리브레이션 필요(tools 로 재산출).
+        self.declare_parameter('bev_src_tl', [0.234, 0.62])
+        self.declare_parameter('bev_src_tr', [0.766, 0.62])
+        self.declare_parameter('bev_src_br', [0.982, 1.00])
+        self.declare_parameter('bev_src_bl', [0.018, 1.00])
         self.declare_parameter('bev_warp_w', 200)
         self.declare_parameter('bev_warp_h', 240)
 
@@ -78,6 +89,9 @@ class OpenCvNode(Node):
         self.lane_valid_min_px = int(self.get_parameter('lane_valid_min_px').value)
         self.lane_hsv_lower = [int(v) for v in self.get_parameter('lane_hsv_lower').value]
         self.lane_hsv_upper = [int(v) for v in self.get_parameter('lane_hsv_upper').value]
+        self.lane_white_s_max = int(self.get_parameter('lane_white_s_max').value)
+        self.lane_white_v_min = int(self.get_parameter('lane_white_v_min').value)
+        self.lane_white_combine = bool(self.get_parameter('lane_white_combine').value)
         self.morph_ksize = int(self.get_parameter('morph_ksize').value)
         self.lane_block_size = int(self.get_parameter('lane_block_size').value)
         self.blur_ksize = int(self.get_parameter('blur_ksize').value)
@@ -98,7 +112,7 @@ class OpenCvNode(Node):
 
         # --- 프로파일 프리셋 해석 (개별 param 명시 시 덮어씀) ---
         profiles = {
-            'white_track': {'method': 'brightness', 'polarity': 'light'},
+            'white_track': {'method': 'white', 'polarity': 'light'},
             'orange_track': {'method': 'color', 'polarity': 'dark'},
         }
         self.lane_profile = str(self.get_parameter('lane_profile').value)
@@ -185,6 +199,9 @@ class OpenCvNode(Node):
                 polarity=self.lane_polarity,
                 hsv_lower=self.lane_hsv_lower,
                 hsv_upper=self.lane_hsv_upper,
+                white_s_max=self.lane_white_s_max,
+                white_v_min=self.lane_white_v_min,
+                white_combine=self.lane_white_combine,
                 block_size=self.lane_block_size,
                 blur_ksize=self.blur_ksize,
                 morph_ksize=self.morph_ksize,
@@ -221,6 +238,7 @@ class OpenCvNode(Node):
                 self.get_logger().info(
                     f'lane: valid={lane.valid} offset={lane.offset:+.3f} '
                     f'curvature={lane.curvature:+.3f} pixels={lane.pixels} '
+                    f'mask_px={lane.mask_pixels} '
                     f'valid_bands={lane.valid_bands} L={lane.left_detected} '
                     f'R={lane.right_detected} '
                     f'(profile={self.lane_profile}, method={self.lane_method})'

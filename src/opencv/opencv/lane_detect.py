@@ -20,9 +20,15 @@
       검출된 라인에서 lane_width_ratio(BEV 폭 대비 차폭)의 절반만큼 옆으로
       이동해 반대쪽을 추정한다(valid_bands=1, 신뢰도 낮음 표시).
 
-    이진화 경로(method)는 기존 트랙 프로파일을 그대로 유지한다:
-      - brightness : 그레이스케일 + adaptiveThreshold(polarity)  [대회 white_track]
+    이진화 경로(method):
+      - white      : HSV 저채도·고명도 inRange 흰색 마스크          [대회 white_track 기본]
+      - brightness : 그레이스케일 + adaptiveThreshold(polarity)  [명암 기반 대안]
       - color      : HSV inRange 색 마스크                        [연습 orange_track]
+
+    white 경로 배경: 밝기(brightness) 기반은 조명이 어두우면 임계가 흔들리고,
+    트랙 양옆 파란 매트가 그레이스케일에서 중간 밝기라 마스크에 새어 든다. 흰 선의
+    결정적 특징인 "채도(S) 낮음 + 명도(V) 높음"으로 게이팅하면 유채색(파란 매트/
+    신발)이 채도로 걸러진다.
 
     Hough 방식 대비 이점:
       - 급커브를 직선 2점 외삽이 아니라 2차 곡선으로 적합 → 곡률 표현이 실제 곡선을 따름.
@@ -39,6 +45,7 @@
     valid       좌/우 중 한쪽 이상 신뢰 검출 시 True.
     curvature   [-1,1] 곡률 추정. (먼_offset - 가까운_offset)/2. 부호=커브 방향.
     pixels      BEV 이진 마스크의 차선 픽셀 총수 — 로깅/튜닝용.
+    mask_pixels BEV 변환 전 원본 이진 마스크 픽셀 수(흰색 마스크 등) — 로깅/튜닝용.
     valid_bands 차선 중앙 산출에 기여한 라인 side 수(0/1/2). 1이면 한쪽만 보여
                 반대쪽을 추정한 것(근거 약함).
     left_detected / right_detected  좌/우 2차 적합 성공 여부(진단).
@@ -56,9 +63,11 @@ import numpy as np
 POLARITY_LIGHT = 'light'  # 어두운 바닥 위 밝은 테이프/도색 (대회 흰 경계선)
 POLARITY_DARK = 'dark'    # 밝은 바닥 위 어두운 라인
 
-# 검출 방식: 'brightness'=그레이스케일 명암(폴라리티), 'color'=HSV 색 마스크.
+# 검출 방식: 'brightness'=그레이스케일 명암(폴라리티), 'color'=HSV 색 마스크,
+# 'white'=HSV 저채도·고명도 흰색 마스크(대회 white_track 기본 — 8.2/10번).
 METHOD_BRIGHTNESS = 'brightness'
 METHOD_COLOR = 'color'
+METHOD_WHITE = 'white'
 
 
 @dataclass
@@ -67,6 +76,7 @@ class LaneResult:
     valid: bool
     curvature: float
     pixels: int = 0             # BEV 이진 마스크의 차선 픽셀 총수 — 로깅/튜닝용.
+    mask_pixels: int = 0        # BEV 변환 전 원본 이진 마스크 픽셀 수(흰색 마스크 등) — 로깅/튜닝용.
     valid_bands: int = 0        # 차선 중앙에 기여한 라인 side 수 — 신뢰도 판단용.
     left_detected: bool = False
     right_detected: bool = False
@@ -86,6 +96,28 @@ def _color_mask(bgr, hsv_lower, hsv_upper):
     hsv = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
     lower = np.array(hsv_lower, dtype=np.uint8)
     upper = np.array(hsv_upper, dtype=np.uint8)
+    return cv2.inRange(hsv, lower, upper)
+
+
+def _white_mask(bgr, s_max=50, v_min=150, blur_ksize=5):
+    """HSV 저채도·고명도 영역만 남긴 흰색 마스크.
+
+    흰 선은 채도(S) 낮고 명도(V) 높음 → inRange(hsv, (0,0,v_min), (180,s_max,255)).
+    파란 매트/신발 등 유채색은 S 가 높아 걸러진다(대회 white_track). s_max 를 낮출수록
+    유채색 배제가 강해지고, v_min 을 높일수록 밝은 것만 통과한다.
+
+    기본값(s_max=50, v_min=150)은 실트랙 bag(track_full_20260714_082403) HSV 실측으로
+    정한 값이다: 흰 선 S≤12·V≥215, 파란 매트 S≥92, 어두운 노면 V≤118 로 분리되어,
+    s_max 는 [12,92] 중앙(50), v_min 은 [118,215] 하단여유(150)에 둬 조명 변화 마진을 둔다.
+    """
+    k = int(blur_ksize)
+    if k >= 3:
+        if k % 2 == 0:
+            k += 1
+        bgr = cv2.GaussianBlur(bgr, (k, k), 0)
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    lower = np.array([0, 0, int(v_min)], dtype=np.uint8)
+    upper = np.array([180, int(s_max), 255], dtype=np.uint8)
     return cv2.inRange(hsv, lower, upper)
 
 
@@ -197,14 +229,18 @@ def compute_lane_offset(
     polarity=POLARITY_LIGHT,
     hsv_lower=(5, 80, 80),
     hsv_upper=(22, 255, 255),
+    white_s_max=50,
+    white_v_min=150,
+    white_combine=False,
     block_size=25,
     blur_ksize=5,
     morph_ksize=3,
     # --- BEV 4점(원본 폭/높이 대비 0~1 비율) + 결과 크기 ---
-    bev_src_tl=(0.20, 0.62),
-    bev_src_tr=(0.80, 0.62),
-    bev_src_br=(1.02, 1.00),
-    bev_src_bl=(-0.02, 1.00),
+    # 실트랙 bag(track_full_20260714_082403) 직선·중앙 구간 캘리브레이션 값(opencv_node 와 일치).
+    bev_src_tl=(0.234, 0.62),
+    bev_src_tr=(0.766, 0.62),
+    bev_src_br=(0.982, 1.00),
+    bev_src_bl=(0.018, 1.00),
     warp_w=200,
     warp_h=240,
     # --- 슬라이딩 윈도우 & 유효성 ---
@@ -230,10 +266,18 @@ def compute_lane_offset(
     # 1) 이진화
     if method == METHOD_COLOR:
         mask = _color_mask(image_bgr, hsv_lower, hsv_upper)
+    elif method == METHOD_WHITE:
+        mask = _white_mask(image_bgr, white_s_max, white_v_min, blur_ksize)
+        # 견고성 옵션: 흰색(채도 게이팅) 마스크와 명암 마스크를 AND 로 결합.
+        if white_combine:
+            gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+            mask = cv2.bitwise_and(
+                mask, _binarize_lane(gray, polarity, block_size, blur_ksize))
     else:
         gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
         mask = _binarize_lane(gray, polarity, block_size, blur_ksize)
     mask = _denoise(mask, morph_ksize)
+    mask_px = int((mask > 0).sum())
 
     # 2) BEV 변환
     M = build_perspective(w, h, bev_src_tl, bev_src_tr, bev_src_br, bev_src_bl,
@@ -245,8 +289,8 @@ def compute_lane_offset(
     overlay = cv2.cvtColor(binary_bev, cv2.COLOR_GRAY2BGR) if draw else None
 
     if total_px < valid_min_px:
-        return LaneResult(0.0, False, 0.0, pixels=total_px, valid_bands=0,
-                          overlay=overlay)
+        return LaneResult(0.0, False, 0.0, pixels=total_px, mask_pixels=mask_px,
+                          valid_bands=0, overlay=overlay)
 
     # 3~4) 히스토그램 + 슬라이딩 윈도우
     leftx_base, rightx_base = find_lane_bases(binary_bev, hist_ratio)
@@ -287,8 +331,8 @@ def compute_lane_offset(
     center_far = lane_center_at(y_far)
 
     if center_near is None:
-        return LaneResult(0.0, False, 0.0, pixels=total_px, valid_bands=0,
-                          overlay=overlay)
+        return LaneResult(0.0, False, 0.0, pixels=total_px, mask_pixels=mask_px,
+                          valid_bands=0, overlay=overlay)
 
     valid_bands = 2 if (left_detected and right_detected) else 1
 
@@ -315,5 +359,6 @@ def compute_lane_offset(
                    4, (0, 0, 255), -1)
 
     return LaneResult(offset, True, curvature, pixels=total_px,
-                      valid_bands=valid_bands, left_detected=left_detected,
+                      mask_pixels=mask_px, valid_bands=valid_bands,
+                      left_detected=left_detected,
                       right_detected=right_detected, overlay=overlay)

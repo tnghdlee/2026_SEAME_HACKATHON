@@ -55,7 +55,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'cruise_throttle',
-            default_value='0.18',
+            default_value='0.2',
             description='직진 순항 throttle. 조향만 점검하려면 0.0 으로 주면 바퀴가 안 돈다.',
         ),
         DeclareLaunchArgument(
