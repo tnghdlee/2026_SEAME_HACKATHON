@@ -33,7 +33,7 @@ def generate_launch_description():
     require_green_start = LaunchConfiguration('require_green_start')
     cruise_throttle = LaunchConfiguration('cruise_throttle')
     # 차선 트랙 프로파일. 기본은 대회 규정 트랙(검은 바닥+양쪽 흰 경계선):
-    # brightness/light/split_lanes=True. 연습 트랙(회색 바닥+주황 라인)에서
+    # brightness/light. 연습 트랙(회색 바닥+주황 라인)에서
     # 실주행 테스트할 때만 lane_profile:=orange_track 으로 전환.
     lane_profile = LaunchConfiguration('lane_profile')
     # 출발 직진 유예(제어 프레임): 초록불 출발 확정 후 이 프레임 수 동안 표지판
@@ -62,7 +62,7 @@ def generate_launch_description():
             'lane_profile',
             default_value='white_track',
             description=('차선 트랙 프로파일. 기본 white_track(대회: 검은 바닥+흰 '
-                         '경계선, brightness/light/split). 연습 트랙은 orange_track.'),
+                         '경계선, brightness/light). 연습 트랙은 orange_track.'),
         ),
         DeclareLaunchArgument(
             'start_straight_frames',
@@ -121,19 +121,18 @@ def generate_launch_description():
                     'vehicle_config_file': vehicle_config_path,
                     # 차선 오프셋 발행(/lane/offset) — inference_node 조향 입력.
                     'publish_lane': True,
-                    # 트랙 프로파일이 검출 방식(method/polarity/split_lanes)을 결정.
-                    # 기본 white_track(대회). 개별 검출 param 을 명시하면 프리셋을
-                    # 덮어쓴다(opencv_node 참조). 여기선 프로파일에 맡기고,
-                    # 공통 기하(ROI·밴드)만 명시 — 실트랙 튜닝 대상.
+                    # 트랙 프로파일이 검출 방식(method/polarity)을 결정. 기본
+                    # white_track(대회). 개별 검출 param(lane_method/lane_polarity)을
+                    # 명시하면 프리셋을 덮어쓴다(opencv_node 참조).
                     'lane_profile': lane_profile,
-                    # 아래 픽셀 기준 값들은 발행 해상도 800×600 기준(vehicle_config
-                    # IMAGE_WIDTH/HEIGHT). 320×240 기준값에서 선형 ×2.5, 면적
-                    # ×6.25 로 스케일했다. 해상도 변경 시 함께 재조정할 것.
-                    'roi_top': 125,           # 50 × (600/240) — 하단 ROI 시작 Y
-                    'lane_num_bands': 3,      # 해상도 무관
-                    'lane_valid_min_px': 250,  # 40 × 6.25 — 밴드 유효 픽셀 하한
-                    'morph_ksize': 7,          # 3 × 2.5 — 디노이즈 열림 커널
-                    'lane_block_size': 63,     # 25 × 2.5 — 적응형 임계값 창(홀수)
+                    # 아래 값은 발행 해상도(vehicle_config IMAGE_WIDTH/HEIGHT,
+                    # 800×600) 기준. lane_block_size·morph_ksize 는 BEV warp 전
+                    # 원본 프레임에 적용되므로 해상도에 비례해 스케일했다(×2.5).
+                    # ⚠️ BEV 4점(bev_src_*)·슬라이딩 윈도우 param 은 opencv_node
+                    # 기본값을 쓰며 실트랙 캘리브레이션 대상(CLAUDE.md 10 참조).
+                    'lane_valid_min_px': 250,  # BEV 이진 마스크 픽셀 하한(미만 조기 무효)
+                    'morph_ksize': 7,          # 3 × 2.5 — 디노이즈 열림 커널(원본)
+                    'lane_block_size': 63,     # 25 × 2.5 — 적응형 임계값 창(홀수, 원본)
                     'debug_log': False,
                 },
             ],
