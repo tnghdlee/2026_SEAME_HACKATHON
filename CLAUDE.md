@@ -194,25 +194,42 @@ ros2 launch control auto_driving.launch.py
 - 카메라/차선 OpenCV (`opencv/lane_detect.py` + `opencv_node.py` 실측 — BEV+슬라이딩 윈도우):
   - **검출 방식(전면 교체, 2026-07)**: 옛 Hough 라인/밴드 무게중심 방식을 **폐기**하고 **BEV(Bird's Eye View) → 히스토그램(출발점) → 슬라이딩 윈도우 → 2차 함수 적합** 파이프라인으로 곡선·직선을 모두 인식한다. 프레임당: ① 이진화(brightness/color) → ② BEV 원근변환(사다리꼴 4점→직사각형 조감도) → ③ BEV 하단 열 합 히스토그램으로 좌/우 출발 x 탐색 → ④ 슬라이딩 윈도우로 차선 픽셀 수집(`minpix` 넘으면 재중심화) → ⑤ 좌/우 각각 2차 함수 `x=a·y²+b·y+c` 적합 → ⑥ 차선 중앙(near/far)과 카메라 중심 편차로 offset/curvature.
   - **두 트랙의 존재(중요)**: 특성이 반대인 두 트랙을 **프로파일**로 보존하며, **기본은 대회 규정 트랙**이다.
-    - **대회 규정 트랙 = `white_track`(기본)**: **검은 바닥 + 양쪽 흰 경계선.** 차량은 좌우 흰 경계선의 중점을 추종. 전략 = `method='brightness'`, `polarity='light'`(어두운 바닥 위 밝은 선), **`split_lanes=True`**.
-    - **연습 트랙 = `orange_track`(대안, 현재 유일 실주행 테스트 가능)**: 회색 바닥 + 주황 라인. `method='color'`, `hsv_lower=[5,80,80]`/`hsv_upper=[22,255,255]`(OpenCV H 0~180, 주황≈H5~22), `polarity='dark'`, `split_lanes=False`.
-  - **검출 방식(2026-07 갱신 — Hough 라인 피팅)**: 밴드 무게중심(band-centroid)에서 **확률적 허프 변환(`cv2.HoughLinesP`)** 으로 교체됨. 하단 ROI를 이진화 → **Canny 에지 → HoughLinesP** 로 직선 세그먼트를 뽑아 좌/우 차선을 피팅한다. 각 라인을 `x=f(y)`(거의 수직)로 보고 **near(ROI 하단)·far(ROI 상단)** 에서 x를 외삽해 차선 중앙을 구한다. 이진화 두 경로(프로파일 유지):
-    - `brightness` — 그레이스케일 + **adaptive threshold**(`ADAPTIVE_THRESH_MEAN_C`, `blockSize=25`, `C=∓10`, 불균일 조명 대응). ROI 전반 그림자로 한쪽 라인이 통째로 지워지는 것을 막기 위해 전역 Otsu 대신 adaptive 사용.
+    - **대회 규정 트랙 = `white_track`(기본)**: **검은 바닥 + 양쪽 흰 경계선.** 좌우 흰 경계선을 각각 2차 곡선으로 적합해 중점을 추종. 전략 = `method='brightness'`, `polarity='light'`(어두운 바닥 위 밝은 선).
+    - **연습 트랙 = `orange_track`(대안, 현재 유일 실주행 테스트 가능)**: 회색 바닥 + 주황 라인. `method='color'`, `hsv_lower=[5,80,80]`/`hsv_upper=[22,255,255]`(OpenCV H 0~180, 주황≈H5~22), `polarity='dark'`.
+  - **이진화 두 경로**(BEV 변환 전 원본 프레임에 적용 → 이진 마스크를 warp):
+    - `brightness` — 그레이스케일 + **adaptive threshold**(`ADAPTIVE_THRESH_MEAN_C`, `blockSize=25`, `C=∓10`, 불균일 조명 대응). 전역 Otsu 대신 adaptive 로 그림자에 한쪽 라인이 통째로 지워지는 것을 방지.
     - `color` — **HSV `inRange`** 색 마스크. 흰/회색 바닥 위 유색 라인에 강건.
-    - ⚠️ **조명 민감성(코드 주석 명시)**: `brightness` 경로는 광택 바닥의 반사·주름을 에지/라인으로 오검출할 수 있음(실측). 흰 경계선(대회) 트랙은 검은 바닥이라 `brightness/light`가 적합하고, 회색+주황(연습)은 `color`가 강건. Hough는 여기에 더해 **점선·짧은 마킹**(`min_line_length`/`max_line_gap` 튜닝 민감)과 **급커브 직선 근사**(near/far 2점 외삽)에 취약하다. `hough_min_angle_deg` 각도 게이트로 near-수평 세그먼트(정지선/노이즈)를 버린다.
-  - **트랙 프로파일 ROS param**: `lane_profile`(기본 **`white_track`**, 대안 `orange_track`)이 `method`/`polarity`/`split_lanes` 프리셋을 결정. 개별 param(`lane_method`/`lane_polarity`/`split_lanes`)을 **명시하면 프리셋을 덮어씀(개별 param 우선)**. 미명시 센티널 = `lane_method`/`lane_polarity` 빈 문자열 `''`, `split_lanes` `'auto'`.
-    - `white_track` 프리셋: `method=brightness`, `polarity=light`, `split_lanes=True`.
-    - `orange_track` 프리셋: `method=color`, `polarity=dark`, `split_lanes=False`.
+    - ⚠️ **조명 민감성**: `brightness` 경로는 광택 바닥 반사·주름을 라인으로 오검출할 수 있음. 흰 경계선(대회) 트랙은 검은 바닥이라 `brightness/light`가 적합, 회색+주황(연습)은 `color`가 강건.
+  - **트랙 프로파일 ROS param**: `lane_profile`(기본 **`white_track`**, 대안 `orange_track`)이 `method`/`polarity` 프리셋을 결정. 개별 param(`lane_method`/`lane_polarity`)을 **명시하면 프리셋을 덮어씀(개별 param 우선)**. 미명시 센티널 = 빈 문자열 `''`. (옛 `split_lanes` param 은 폐기 — 좌/우 분리는 이제 BEV 히스토그램 좌/우 반쪽 argmax + 슬라이딩 윈도우가 대신한다.)
+    - `white_track` 프리셋: `method=brightness`, `polarity=light`.
+    - `orange_track` 프리셋: `method=color`, `polarity=dark`.
     - launch 인자로 노출: `ros2 launch control auto_driving.launch.py lane_profile:=orange_track`(연습 트랙 테스트 시). 기본 실행은 `white_track`.
-  - **Hough 파라미터 ROS param(신규, 전부 `opencv_node`에서 노출·`compute_lane_offset`로 전달)**: `hough_threshold`(기본 `30`), `hough_min_line_length`(`20`), `hough_max_line_gap`(`15`), `hough_min_angle_deg`(`25.0`, near-수평 세그먼트 게이트), `canny_low`(`50`)/`canny_high`(`150`). ⚠️ `min_line_length`/`max_line_gap`은 픽셀 기준이라 해상도에 비례해 스케일할 것(800×600은 각각 ~40/~30 권장). 실트랙 튜닝 대상.
-  - **기타 ROS param·기본값**: `roi_right`(기본 `-1`=전폭/원본 오른쪽 끝; 비대칭 ROI 크롭용), `lane_half_norm`(기본 `0.5`), `morph_ksize`(기본 `3`, 형태학적 열림 커널; `<=1` 비활성), `roi_top=50`(vehicle_config `ROI_TOP`과 일치), `roi_left=0`, `lane_valid_min_px=40`(마스크 픽셀 하한 게이트), `lane_block_size=25`(adaptive 창), `lane_hsv_lower/upper`(주황 기본), 전처리 blur `GaussianBlur(5,5)`. ⚠️ `lane_num_bands`/`side_min_px`는 밴드 방식 잔여 인자로 **Hough에선 미사용**이지만 호출부(opencv_node/튜닝 하니스) 호환을 위해 시그니처만 유지.
-  - **정규화 기준**: 오프셋은 **ROI 중앙이 아니라 원본 이미지 중앙(w/2) 기준**으로 정규화 → `roi_left>0`/`roi_right<w` 비대칭 ROI 에서도 `offset=0`이 카메라 중심선을 뜻함. (`_norm_offset(cx_local, roi_left, img_half)`)
-  - **split 모드(좌/우 분리)**: `split_lanes=True`는 원본 이미지 중앙을 ROI 로컬로 투영한 고정 분할선 기준으로 Hough 세그먼트를 좌/우로 나눠 각각 평균 피팅하고 두 라인의 중점을 차선 중앙으로 삼음(양쪽 경계선 트랙). 좌우 모두 검출→중점(`valid_bands=2`), 한쪽만→그 라인 ± `lane_half_norm`(`valid_bands=1`), 둘 다 없음→무효. `split_lanes=False`는 검출된 모든 라인을 하나로 평균해 단일 중앙선 추종(`valid_bands=1`).
-  - **`/lane/offset` 산출**: near/far 차선 중앙을 각각 정규화한 뒤 `offset=(2·off_near + off_far)/3`(near 가중) clip `[-1,1]`. `valid`=Hough 라인 검출 성공. `curvature=(off_far - off_near)/2` clip `[-1,1]`. **발행 배열은 `[offset, valid, curvature]` 3원소 유지**(문서화된 인터페이스). `LaneResult.valid_bands`(기여 side 수 0/1/2)는 신뢰도 판단용으로 반환·진단 로그 노출.
-  - **실측 대기 항목(코드로 확정 금지)**: ① near/far 2점 외삽은 급커브를 직선으로 근사 — 곡률은 근사치. ② `lane_half_norm=0.5`는 "차선 폭 ≈ 이미지 폭의 절반" 가정 — 한쪽 소실 구간 조향 정확도를 좌우하므로 실측 튜닝 대상. ③ Hough `threshold`/`min_line_length`/`max_line_gap`이 점선·마킹 두께에 민감 — 실트랙 프레임으로 선(先)튜닝 필요.
-  - **Canny 디버그 영상**: `/opencv/image/edge`는 `Canny(50,150)`(원본 그레이 기반 시각화용; 차선 오프셋 산출용 Canny는 `canny_low/high` param 별도).
-  - **진단 로깅**: 약 15프레임마다 `valid/offset/curvature/pixels/valid_bands` + 프로파일·method·split 출력 — `valid=False`인데 `pixels`가 `valid_min_px` 근처면 마스크는 있으나 Hough 라인이 안 잡히는 것(threshold/min_line_length 완화 또는 각도 게이트 확인), `pixels=0`이면 ROI 내 검출 색/명암 없음(라인 색/조명/ROI 재확인).
-  - **검증(차량 없이)**: `compute_lane_offset` 순수 함수 합성 이미지 스모크 테스트(dev 박스 cv2 5.0.0/numpy 2.2.6) — (a) 대칭 흰선→offset≈0·curv≈0·bands=2, (b) 우측 이동→off≈+0.30, (c) 좌측 이동→off≈−0.30, (d) 상단 우측 커브→curvature>0, (e) 한쪽만→반대쪽 추정·bands=1, (f) 회색+주황 단일선(orange_track/color)→off≈0, (g) 빈 프레임→invalid. **전 케이스 PASS**(Canny+HoughLinesP 포함 엔드투엔드). ⚠️ cv2 버전에 따라 `HoughLinesP` 반환 shape가 `(N,1,4)`/`(N,4)`로 달라 코드에서 flatten 처리함. 실트랙 프레임 재검증은 보드에서.
+  - **BEV 원근변환 param(신규·핵심)**: `bev_src_tl`/`bev_src_tr`/`bev_src_br`/`bev_src_bl`(사다리꼴 4점, **원본 폭/높이 대비 0~1 비율**, 순서 좌상→우상→우하→좌하), `bev_warp_w=200`/`bev_warp_h=240`(조감도 결과 크기 px). 기본값 `tl=[0.20,0.62]`/`tr=[0.80,0.62]`/`br=[1.02,1.00]`/`bl=[-0.02,1.00]`은 320×160 기준 출발점일 뿐 **실차 캘리브레이션 필수**(아래).
+  - **슬라이딩 윈도우 param(신규)**: `n_windows=10`, `margin=30`(윈도우 반너비 px, BEV), `minpix=25`(재중심화 최소 픽셀), `hist_ratio=0.5`(출발점 히스토그램에 쓸 하단 비율), `min_lane_px=200`(한쪽 라인 인정 최소 누적 픽셀), `lane_width_ratio=0.55`(한쪽 소실 폴백 차폭, BEV 폭 비율).
+  - **유지 param**: `lane_valid_min_px=40`(BEV 이진 마스크 픽셀 하한, 미만이면 조기 무효), `lane_hsv_lower/upper`(주황 기본), `lane_block_size=25`(adaptive 이웃 창), `blur_ksize=5`, `morph_ksize=3`(형태학적 열림, `<=1` 비활성). ⚠️ (폐기 param — launch/`-p`에 남아 있으면 정리) `roi_top`/`roi_left`/`roi_right`/`lane_num_bands`/`lane_half_norm`/`side_min_px`/`split_lanes`/`hough_*`/`canny_*`. ROI 영역 선택은 BEV 상단 src 비율이 대신한다. vehicle_config `ROI_TOP=50`은 카메라 노드용이며 차선 검출엔 미사용.
+  - **정규화 기준**: 오프셋은 **BEV 폭 중앙(warp_w/2) 기준**으로 정규화 → `offset=0`이 조감도 중심선을 뜻함. BEV 4점을 직선 구간에서 좌우 평행선으로 맞추면 이 중심선이 카메라 중심선과 일치한다(캘리브레이션의 목적). 부호 규약: `offset<0`=차선 중앙이 카메라 중심보다 왼쪽, `>0`=오른쪽(→조향 매핑은 하류 `steer_sign`).
+  - **한쪽 차선 소실 폴백**: 좌/우 중 한쪽만 2차 적합에 성공하면(반대쪽 `min_lane_px` 미달) 검출된 라인에서 `lane_width_ratio`의 절반(BEV 폭 비율)만큼 옆으로 밀어 반대쪽을 추정(`valid_bands=1`, 신뢰도 낮음 표시). 좌우 모두 성공→`valid_bands=2`(중점), 둘 다 실패→`valid=False`.
+  - **`/lane/offset` 산출**: near(BEV 하단 y=warp_h-1)·far(상단 y=0) 차선 중앙의 정규화 오프셋에서 `offset=(2·off_near+off_far)/3`(near 가중+far 피드포워드), `curvature=(off_far-off_near)/2` clip `[-1,1]`. **발행 배열은 `[offset, valid, curvature]` 3원소 유지**(문서화된 인터페이스 — `inference_node` PD 조향 그대로 호환). `LaneResult`의 `pixels`/`valid_bands`(0/1/2)·`left_detected`/`right_detected`·`overlay`는 진단·디버그용.
+  - **디버그 영상**: `/opencv/image/edge`는 기존 `Canny(50,150)`(차선 오프셋과 무관한 monitor 시각화용) 유지. **신규 `/opencv/image/lane`**(`publish_lane_debug`, 기본 True)는 **BEV 조감도 + 슬라이딩 윈도우/적합 곡선/중앙선 오버레이** — BEV 4점 캘리브레이션·튜닝은 이 영상을 보고 한다.
+  - ⚠️ **BEV 4점 캘리브레이션(실차 필수·최우선)**: `bev_src_*` 기본값은 출발점일 뿐이다. 직선 구간에 차를 세우고 `/opencv/image/lane` 조감도에서 **좌우 차선이 세로로 나란한 평행선**이 되도록 상단 두 점(tl,tr)의 y·좌우 폭을 맞춰야 `offset=0`이 카메라 중심선을 뜻한다.
+
+    ```bash
+    # BEV 4점 오버라이드 예시(조감도가 평행선이 되도록 실측 조정)
+    ros2 run opencv opencv_node --ros-args \
+      -p bev_src_tl:="[0.22, 0.60]" -p bev_src_tr:="[0.78, 0.60]" \
+      -p bev_src_br:="[1.05, 1.00]" -p bev_src_bl:="[-0.05, 1.00]"
+    ```
+  - **진단 로깅**: 약 15프레임마다 `valid/offset/curvature/pixels/valid_bands/L/R` + 프로파일·method 출력 — `valid=False`인데 `pixels`가 `lane_valid_min_px` 근처면 BEV 안에 라인이 거의 없다는 뜻(**BEV 4점**/HSV/threshold 재확인), `pixels=0`이면 원본에 검출 색/명암 없음(라인 색/조명 재확인).
+  - **검증(차량 없이)**: `compute_lane_offset` 순수 함수 합성 이미지 단위 테스트(`opencv/test/test_lane_detect.py`) — (a) 출발점 히스토그램, (b) 대칭 직선→offset≈0·curvature≈0, (c) 우측 이동→+offset, (d) 우커브→+curvature, (e) 좌커브→−curvature, (f) 한쪽 소실→`valid_bands=1` 폴백, (g) 미검출→`valid=False`. cv2+numpy 있는 개발 박스에서 **7 PASS**. 실트랙 BEV 4점·임계값 튜닝은 보드에서 재실행.
+  - **교체 후 빌드·검증(드롭인)**: 발행 인터페이스(`/lane/offset [offset,valid,curvature]`)와 monitor 디버그 토픽(gray/blur/edge)이 그대로라 **`inference_node`·대시보드 배선은 변경 불필요** — `opencv`만 재빌드하면 된다.
+
+    ```bash
+    colcon build --packages-select opencv && source install/setup.bash
+    ros2 launch control auto_driving.launch.py            # white_track(대회)
+    ros2 topic echo /lane/offset                          # 발행 확인
+    ros2 topic info /lane/offset                          # pub/sub 연결 확인(8.2)
+    python3 src/opencv/opencv/test/test_lane_detect.py    # 차량 없이 7 PASS
+    ```
 
 ### 10.1 채택 모델 · 경로 · 클래스 매핑 (확정)
 
@@ -378,7 +395,7 @@ src/
 ├── joystick_msgs/  [ament_cmake]   msg/Joystick.msg
 ├── monitor/        [ament_python]  monitor/monitor_node.py  (+ templates/ static/)
 ├── opencv/         [ament_python]  opencv/opencv_node.py, opencv/lane_detect.py
-│                                    ↳ lane_detect.py: Hough 라인(cv2.HoughLinesP) 차선 오프셋(순수 함수, 이미지중앙 정규화·split 좌/우 분리). brightness/color 이진화 → Canny → Hough, 노드 기본 프로파일 white_track(brightness/light/split). → /lane/offset [offset,valid,curvature]. 상세는 본문 10.
+│                                    ↳ lane_detect.py: BEV→히스토그램→슬라이딩 윈도우→2차 함수 적합 차선 오프셋(순수 함수, 곡선·직선 인식, BEV폭중앙 정규화·한쪽소실 폴백). brightness/color 이진화, 노드 기본 프로파일 white_track(brightness/light). → /lane/offset [offset,valid,curvature] + 디버그 /opencv/image/lane. 상세는 본문 10.
 └── topst_utils/    [ament_python]  공용 유틸 (노드 없음)
 ```
 
