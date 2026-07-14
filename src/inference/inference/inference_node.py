@@ -120,6 +120,14 @@ class InferenceNode(Node):
         self.declare_parameter('fork_commit_frames', dp['fork_commit_frames'])
         self.declare_parameter('sign_margin', dp['sign_margin'])
         self.declare_parameter('sign_conf', dp['sign_conf'])
+        # 갈림길 커밋 트리거(근접/소실, B.3): 방향은 멀리서 래치하되 표지판이
+        # 가까워졌을 때만 꺾기 시작. frame_height 는 image_callback 이 항상 넘기므로
+        # 실주행에서 활성. sign_proximity_metric 으로 근접 지표를 카메라 지오메트리에
+        # 맞게 선택('bottom_y'/'area'/'height'), sign_commit_ratio 로 임계 튜닝.
+        self.declare_parameter('sign_proximity_metric', dp['sign_proximity_metric'])
+        self.declare_parameter('sign_commit_ratio', dp['sign_commit_ratio'])
+        self.declare_parameter('sign_lost_min_ratio', dp['sign_lost_min_ratio'])
+        self.declare_parameter('sign_lost_commit_frames', dp['sign_lost_commit_frames'])
         self.declare_parameter('start_straight_frames', dp['start_straight_frames'])
         self.declare_parameter('drive_direction', dp['drive_direction'])
         # 출발 킥스타트: 초록불 확정 직후 조향 없이 고정 throttle 로 직진하는 구간.
@@ -210,6 +218,14 @@ class InferenceNode(Node):
             'fork_commit_frames': int(self.get_parameter('fork_commit_frames').value),
             'sign_margin': float(self.get_parameter('sign_margin').value),
             'sign_conf': float(self.get_parameter('sign_conf').value),
+            'sign_proximity_metric': str(
+                self.get_parameter('sign_proximity_metric').value),
+            'sign_commit_ratio': float(
+                self.get_parameter('sign_commit_ratio').value),
+            'sign_lost_min_ratio': float(
+                self.get_parameter('sign_lost_min_ratio').value),
+            'sign_lost_commit_frames': int(
+                self.get_parameter('sign_lost_commit_frames').value),
             'start_straight_frames': int(
                 self.get_parameter('start_straight_frames').value),
             'drive_direction': float(self.get_parameter('drive_direction').value),
@@ -440,7 +456,11 @@ class InferenceNode(Node):
                 for d in dets
             ]
             msg_out = String()
-            msg_out.data = json.dumps({'detections': payload, 'state': state})
+            # frame_hw(=[높이, 폭]) 를 함께 실어, 근접 지표 캘리브레이션
+            # (tools/sign_commit_calibration.py)이 박스 좌표를 프레임 크기로
+            # 정규화할 수 있게 한다(하드코딩 해상도 불필요).
+            msg_out.data = json.dumps({'detections': payload, 'state': state,
+                                       'frame_hw': [frame_h, frame_w]})
             self.det_pub.publish(msg_out)
 
     # ---- 차선 신호 저장 ----
@@ -483,7 +503,8 @@ class InferenceNode(Node):
                 f'ctrl: steer={steer:+.3f} throttle={throttle:.3f} '
                 f'lane(valid={lane.valid} off={lane.offset:+.3f} '
                 f'curv={lane.curvature:+.3f}) corner_hold={st["corner_hold"]:.3f} '
-                f'turn_intent={st["turn_intent"]} fork_remaining={st["fork_remaining"]} '
+                f'turn_intent={st["turn_intent"]} commit={st["commit_triggered"]} '
+                f'fork_remaining={st["fork_remaining"]} '
                 f'kick={st["start_kick_remaining"]} '
                 f'green={st["green_started"]} red={st["red_stopped"]} '
                 f'aruco_stop={aruco_blocked}')

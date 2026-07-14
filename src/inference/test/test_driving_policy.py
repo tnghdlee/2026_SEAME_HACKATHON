@@ -166,6 +166,93 @@ def test_fork_commit_bias():
     assert t == p.p['turn_throttle']
 
 
+def test_sign_proximity_commit_bottom_y():
+    # 근접 게이팅(기본 지표 bottom_y): 방향은 멀리서 래치하되, 표지판 하단이
+    # 프레임 아래로 sign_commit_ratio 만큼 내려오기 전까지는 커밋을 미룬다.
+    H = 480
+    p = DrivingPolicy({'require_green_start': False, 'confirm_frames': 2,
+                       'turn_bias': 0.5, 'steer_sign': 1.0, 'drive_direction': 1.0,
+                       'fork_commit_frames': 5, 'steer_slew': 1.0,
+                       'sign_proximity_metric': 'bottom_y', 'sign_commit_ratio': 0.60,
+                       'sign_lost_commit_frames': 99})  # 소실 폴백은 사실상 끔
+    # 멀리 있는 표지판(하단 y2=0.30H, 프레임 위쪽) 2프레임 → 방향만 래치.
+    far = Det(LEFT_SIGN, 0.9, x1=300, y1=0.20 * H, x2=330, y2=0.30 * H)
+    p.on_detections([far], frame_height=H, frame_width=640)
+    p.on_detections([far], frame_height=H, frame_width=640)
+    assert p.turn_intent == 'left', '멀리서도 방향은 래치(기억)'
+    assert not p.commit_triggered, '멀면(표지판 위쪽) 아직 커밋 안 함'
+    s, _ = p.step(straight())
+    assert abs(s) < 1e-6, '커밋 전 → 바이어스 없이 직진(차선 추종)'
+    # 가까워져 표지판이 아래로 내려옴(하단 y2=0.72H ≥ 0.60) → 커밋 시작.
+    near = Det(LEFT_SIGN, 0.9, x1=290, y1=0.55 * H, x2=340, y2=0.72 * H)
+    p.on_detections([near], frame_height=H, frame_width=640)
+    assert p.commit_triggered and p.fork_remaining == 5, '근접(아래로 내려옴) → 커밋'
+    s, t = p.step(straight())
+    assert s < 0.0, '커밋 시작 → 좌조향 바이어스'
+    assert t == p.p['turn_throttle']
+
+
+def test_sign_proximity_commit_height_metric():
+    # 지표 전환('height'): 박스 높이가 임계 이상 커질 때 커밋(카메라 낮은 경우).
+    H = 480
+    p = DrivingPolicy({'require_green_start': False, 'confirm_frames': 2,
+                       'turn_bias': 0.5, 'steer_sign': 1.0, 'fork_commit_frames': 5,
+                       'steer_slew': 1.0, 'sign_proximity_metric': 'height',
+                       'sign_commit_ratio': 0.20, 'sign_lost_commit_frames': 99})
+    far = Det(LEFT_SIGN, 0.9, x1=300, y1=0.10 * H, x2=330, y2=0.15 * H)  # h=0.05H
+    p.on_detections([far], frame_height=H, frame_width=640)
+    p.on_detections([far], frame_height=H, frame_width=640)
+    assert p.turn_intent == 'left' and not p.commit_triggered
+    near = Det(LEFT_SIGN, 0.9, x1=280, y1=0.10 * H, x2=360, y2=0.35 * H)  # h=0.25H
+    p.on_detections([near], frame_height=H, frame_width=640)
+    assert p.commit_triggered, '높이 지표: 박스 높이 커짐 → 커밋'
+
+
+def test_sign_loss_fallback_commit():
+    # 소실 폴백: 표지판이 충분히 가까워진 뒤 프레임 밖으로 연속 사라지면 커밋.
+    H = 480
+    p = DrivingPolicy({'require_green_start': False, 'confirm_frames': 2,
+                       'turn_bias': 0.5, 'steer_sign': 1.0, 'fork_commit_frames': 5,
+                       'steer_slew': 1.0, 'sign_proximity_metric': 'bottom_y',
+                       'sign_commit_ratio': 0.95,  # 근접 임계 사실상 안 걸리게
+                       'sign_lost_min_ratio': 0.30, 'sign_lost_commit_frames': 2})
+    mid = Det(LEFT_SIGN, 0.9, x1=280, y1=0.30 * H, x2=360, y2=0.40 * H)  # y2=0.40H
+    p.on_detections([mid], frame_height=H, frame_width=640)
+    p.on_detections([mid], frame_height=H, frame_width=640)  # 래치 + max_prox=0.40
+    assert p.turn_intent == 'left' and not p.commit_triggered
+    p.on_detections([], frame_height=H, frame_width=640)     # 1프레임 소실
+    assert not p.commit_triggered, '1프레임 소실로는 커밋 안 함'
+    p.on_detections([], frame_height=H, frame_width=640)     # 2프레임 연속 소실 → 커밋
+    assert p.commit_triggered, '충분히 가까웠던 표지판이 연속 소실 → 커밋'
+
+
+def test_sign_far_blip_no_loss_commit():
+    # 멀리서 잠깐 잡힌(위쪽) 표지판이 사라져도 소실 폴백은 발동하지 않는다
+    # (sign_lost_min_ratio 미만이라 '가까이 온 적 없음'으로 판단).
+    H = 480
+    p = DrivingPolicy({'require_green_start': False, 'confirm_frames': 2,
+                       'steer_sign': 1.0, 'fork_commit_frames': 5, 'steer_slew': 1.0,
+                       'sign_proximity_metric': 'bottom_y', 'sign_commit_ratio': 0.95,
+                       'sign_lost_min_ratio': 0.30, 'sign_lost_commit_frames': 2})
+    tiny = Det(LEFT_SIGN, 0.9, x1=300, y1=0.10 * H, x2=320, y2=0.18 * H)  # y2=0.18H
+    p.on_detections([tiny], frame_height=H, frame_width=640)
+    p.on_detections([tiny], frame_height=H, frame_width=640)
+    assert p.turn_intent == 'left'
+    for _ in range(5):
+        p.on_detections([], frame_height=H, frame_width=640)
+    assert not p.commit_triggered, '멀었던(위쪽) 표지판 소실은 커밋 트리거 아님'
+
+
+def test_sign_commit_backward_compat_no_frame_height():
+    # frame_height 미전달 시엔 종전 동작: 래치 즉시 커밋(하위호환).
+    p = DrivingPolicy({'require_green_start': False, 'confirm_frames': 2,
+                       'steer_sign': 1.0, 'fork_commit_frames': 5, 'steer_slew': 1.0})
+    p.on_detections([Det(LEFT_SIGN, 0.9)])
+    p.on_detections([Det(LEFT_SIGN, 0.9)])
+    assert p.turn_intent == 'left' and p.commit_triggered, '기하 없으면 즉시 커밋'
+    assert p.fork_remaining == 5
+
+
 def test_drive_direction_mirror():
     common = {'require_green_start': False, 'confirm_frames': 1, 'turn_bias': 0.3,
               'steer_sign': 1.0, 'fork_commit_frames': 5, 'steer_slew': 1.0}

@@ -109,6 +109,34 @@ def default_params():
         'fork_commit_frames': 30,    # 제어 프레임(30@20Hz≈1.5s)
         'sign_margin': 0.15,
         'sign_conf': 0.35,
+        # --- 갈림길 커밋 트리거(근접/소실, B.3) ---
+        # 방향(turn_intent)은 표지판을 멀리서 봐도 confirm_frames 로 일찍 래치
+        # (기억)하되, 실제로 꺾는 커밋은 표지판이 충분히 '가까워졌을 때'만 시작
+        # 한다. 멀리서 확정하자마자 꺾어 코스를 벗어나는 것을 막는다(사용자 요구:
+        # "멀리서 봐도 참았다가 갈림길에서 차선 따라 좌/우로 나눠 간다").
+        # ⚠️ 이 게이팅은 on_detections 에 frame_height 가 전달될 때만 활성이다.
+        # 미전달(순수 단위 테스트)시엔 기하 정보가 없어 종전 동작(래치 즉시 커밋)
+        # 을 유지한다(_light_in_roi/_redlight_is_real 와 동일한 하위호환 규약).
+        #
+        # 근접 지표(sign_proximity_metric) — 카메라 지오메트리에 맞게 선택:
+        #   'bottom_y' : 표지판 박스 하단(y2)의 세로 위치/프레임 높이. 가까워질수록
+        #                프레임 아래로 내려감. 카메라가 높아 내려다보고 표지판이
+        #                낮게(지면 근처) 설치된 경우 가장 견고(단조·큰 레인지). [기본]
+        #   'area'     : 박스 면적/프레임 면적. 표지판이 카메라 높이쯤 떠 있어
+        #                세로 위치가 안 변할 때. 폭은 원근눌림이 덜해 높이보다 나음.
+        #   'height'   : 박스 높이/프레임 높이. 카메라가 낮고 표지판을 정면으로 볼 때.
+        #                카메라가 높으면 근접 시 높이가 포화·눌림(비단조)이라 비권장.
+        # 지표값(0~1) ≥ sign_commit_ratio 이면 '가까움'으로 보고 커밋 시작.
+        # ⚠️ 실트랙 캘리브레이션 필수 — 지표를 바꾸면 임계값도 다시 잡아야 한다
+        #    (bottom_y≈0.55~0.7, area≈0.03~0.10, height≈0.15~0.30 대략).
+        'sign_proximity_metric': 'bottom_y',
+        'sign_commit_ratio': 0.60,
+        # 소실 폴백(백업): 표지판이 프레임 밖으로 벗어나 사라지는 경우 대비. 래치된
+        # 방향의 표지판 근접지표가 sign_lost_min_ratio 이상으로 커진 적 있고(=가까이
+        # 왔었고), 이후 sign_lost_commit_frames(YOLO 프레임) 연속 미검출이면 커밋한다.
+        # 표지판이 프레임 안에 계속 보이면 근접 임계가 먼저 걸려 이 백업은 안 쓰인다.
+        'sign_lost_min_ratio': 0.45,
+        'sign_lost_commit_frames': 3,
         # 출발 직진 유예(제어 프레임): 초록불 출발 확정 후 이 프레임 수 동안은
         # 표지판 분기 래치를 억제해 직진(차선 추종)한다. 실코스가 출발→S자→
         # 갈림길 순서이므로 출발 직후 (오)검출된 표지판으로 즉시 꺾이지 않게 한다.
@@ -164,6 +192,12 @@ class DrivingPolicy:
         self.red_stopped = False
         self.turn_intent = None       # 'left' | 'right' | None (첫 확정 래치)
         self.fork_remaining = 0
+        # 갈림길 커밋 트리거 상태: 방향은 멀리서 일찍 래치하되, 실제 꺾기
+        # (fork_remaining>0)는 표지판이 가까워졌을 때만 시작한다. commit_triggered
+        # 는 한 번 커밋을 시작하면 다시 무장하지 않게 하는 래치(1회 분기).
+        self.commit_triggered = False
+        self._sign_max_prox = 0.0      # 래치 후 표지판 최대 근접지표(소실 폴백용)
+        self._sign_absent_streak = 0   # 래치 후 표지판 연속 미검출(YOLO 프레임)
         # 출발 직진 유예 잔여(제어 프레임). 출발 확정 전이에서 arm, step 에서 감소.
         self.start_straight_remaining = 0
         # 출발 킥스타트 잔여(제어 프레임). 초록불 확정 전이에서 arm, step 에서 감소.
@@ -214,6 +248,63 @@ class DrivingPolicy:
             return False                       # 지나치게 큰 박스 → 바닥으로 간주
         return True
 
+    # ---- 갈림길 커밋 트리거(근접/소실) ----
+    def _sign_proximity(self, det, frame_height, frame_width):
+        """표지판 박스의 '근접 정도'를 0~1 스칼라로 환산(sign_proximity_metric).
+
+        가까울수록 값이 커지도록 정의한다:
+          'bottom_y' : 박스 하단(y2)의 세로 위치/프레임 높이. 카메라가 높아
+                       내려다볼 때 가까울수록 표지판이 프레임 아래로 내려감(단조).
+          'area'     : 박스 면적/프레임 면적. frame_width 없으면 높이²로 폴백.
+          'height'   : 박스 높이/프레임 높이.
+        """
+        h = float(frame_height)
+        metric = self.p['sign_proximity_metric']
+        if metric == 'height':
+            return (det.y2 - det.y1) / h
+        if metric == 'area':
+            w = float(frame_width) if frame_width else h
+            return ((det.x2 - det.x1) * (det.y2 - det.y1)) / (w * h)
+        # 기본 'bottom_y'(미지의 metric 문자열도 여기로 폴백).
+        return det.y2 / h
+
+    def _maybe_trigger_commit(self, best_box, frame_height, frame_width):
+        """래치된 방향의 표지판이 충분히 가까워졌는지(또는 프레임 밖으로 벗어나
+        사라졌는지) 판단해 커밋(fork_remaining)을 시작한다. turn_intent 가 이미
+        래치됐고 아직 커밋 전(commit_triggered=False)일 때만 호출된다.
+
+        - frame_height 미전달(순수 단위 테스트): 기하 정보가 없으므로 종전 동작
+          (래치 즉시 커밋). 하위호환.
+        - 근접: 래치 방향 표지판의 근접지표(_sign_proximity) ≥ sign_commit_ratio
+          → 커밋. 표지판이 가까워질수록 지표가 단조 증가하는 성질을 이용.
+        - 소실 폴백(백업): 지표가 sign_lost_min_ratio 이상으로 커진 적 있고(가까이
+          왔었고) 이후 sign_lost_commit_frames(YOLO 프레임) 연속 미검출이면,
+          표지판이 프레임 밖으로 벗어난 것으로 보고 커밋.
+        """
+        p = self.p
+        if not frame_height:
+            self._start_commit()               # 하위호환: 기하 없으면 즉시 커밋
+            return
+        sign_cls = LEFT_SIGN if self.turn_intent == 'left' else RIGHT_SIGN
+        det = best_box.get(sign_cls)
+        if det is not None:
+            prox = self._sign_proximity(det, frame_height, frame_width)
+            if prox > self._sign_max_prox:
+                self._sign_max_prox = prox
+            self._sign_absent_streak = 0
+            if prox >= p['sign_commit_ratio']:
+                self._start_commit()           # 근접 → 커밋
+        else:
+            self._sign_absent_streak += 1
+            if (self._sign_max_prox >= p['sign_lost_min_ratio']
+                    and self._sign_absent_streak >= p['sign_lost_commit_frames']):
+                self._start_commit()           # 소실 폴백 → 커밋
+
+    def _start_commit(self):
+        """커밋 개시: fork_remaining 을 채워 step 이 turn_bias 로 꺾게 한다."""
+        self.commit_triggered = True
+        self.fork_remaining = self.p['fork_commit_frames']
+
     # ---- YOLO 프레임 rate 로 호출 ----
     def on_detections(self, detections, frame_height=None, frame_width=None):
         """detections: class_id/score/x1..y2 속성을 가진 객체 리스트(YoloOnnx.Detection 등).
@@ -229,6 +320,7 @@ class DrivingPolicy:
         #  - 그 외/출발 후: conf_threshold.
         # 빨간불은 바닥 오검출을 기하로 배제(_redlight_is_real).
         best = {}
+        best_box = {}   # 클래스별 최고점 검출 객체(표지판 박스 기하 참조용)
         for d in detections:
             cls = d.class_id
             if cls == GREENLIGHT and not self.green_started:
@@ -244,6 +336,7 @@ class DrivingPolicy:
                 continue
             if d.score > best.get(cls, 0.0):
                 best[cls] = d.score
+                best_box[cls] = d
 
         # 초록/빨강 스트릭 → 래치.
         self._green_streak = self._green_streak + 1 if GREENLIGHT in best else 0
@@ -256,6 +349,9 @@ class DrivingPolicy:
             if not self.green_started:
                 self.turn_intent = None
                 self.fork_remaining = 0
+                self.commit_triggered = False
+                self._sign_max_prox = 0.0
+                self._sign_absent_streak = 0
                 self._left_streak = 0
                 self._right_streak = 0
                 self.last_steer = p['steer_trim']
@@ -295,10 +391,15 @@ class DrivingPolicy:
         if self.turn_intent is None:
             if self._left_streak >= p['confirm_frames']:
                 self.turn_intent = 'left'
-                self.fork_remaining = p['fork_commit_frames']
             elif self._right_streak >= p['confirm_frames']:
                 self.turn_intent = 'right'
-                self.fork_remaining = p['fork_commit_frames']
+
+        # 방향 래치와 실제 커밋(꺾기)의 분리: 방향은 위에서 멀리서도 일찍 래치하되,
+        # fork_remaining(=꺾기 시작)은 표지판이 가까워졌을 때만 세팅한다. 멀리서
+        # 확정하자마자 꺾어 코스를 벗어나는 것을 막는다(B.3). frame_height 미전달
+        # 시엔 종전대로 래치 즉시 커밋(_maybe_trigger_commit 참조, 하위호환).
+        if self.turn_intent is not None and not self.commit_triggered:
+            self._maybe_trigger_commit(best_box, frame_height, frame_width)
 
     # ---- 제어 timer rate 로 호출 ----
     def step(self, lane):
@@ -390,6 +491,7 @@ class DrivingPolicy:
             'green_started': self.green_started,
             'red_stopped': self.red_stopped,
             'turn_intent': self.turn_intent,
+            'commit_triggered': self.commit_triggered,
             'fork_remaining': self.fork_remaining,
             'corner_hold': round(self.corner_hold, 3),
             'start_kick_remaining': self.start_kick_remaining,

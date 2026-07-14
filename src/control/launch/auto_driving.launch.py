@@ -44,6 +44,10 @@ def generate_launch_description():
     # 출발 킥스타트 지속(초): 초록불 확정 직후 조향 없이 고정 throttle 로 직진.
     # 0 으로 주면 킥 비활성(초록불 확정 즉시 정상 차선 추종 시작).
     start_kick_seconds = LaunchConfiguration('start_kick_seconds')
+    # 갈림길 커밋 근접 게이팅(B.3) — 실트랙 캘리브레이션 대상이라 런타임 인자로
+    # 노출한다. 재빌드 없이 sign_commit_ratio:=0.62 처럼 바로 조정.
+    sign_proximity_metric = LaunchConfiguration('sign_proximity_metric')
+    sign_commit_ratio = LaunchConfiguration('sign_commit_ratio')
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -78,6 +82,18 @@ def generate_launch_description():
             default_value='0.0',
             description=('출발 킥스타트 지속(초). 초록불 확정 직후 조향 없이 고정 '
                          'throttle 로 직진 출발. 0=킥 비활성(기본). 켜려면 예: 2.0.'),
+        ),
+        DeclareLaunchArgument(
+            'sign_proximity_metric',
+            default_value='bottom_y',
+            description=('갈림길 커밋 근접 지표. bottom_y(표지판이 프레임 아래로 '
+                         '내려오는 정도 — 높은 카메라 권장) / area / height.'),
+        ),
+        DeclareLaunchArgument(
+            'sign_commit_ratio',
+            default_value='0.60',
+            description=('근접지표 ≥ 이 값이면 갈림길 커밋(꺾기) 시작. 실트랙에서 '
+                         'tools/sign_commit_calibration.py 로 캘리브레이션.'),
         ),
         Node(
             package='camera',
@@ -238,6 +254,28 @@ def generate_launch_description():
                     'commit_lane_weight': 0.3,  # 커밋 중 차선 PD 비중(0=차선무시,1=평소)
                     'commit_steer_slew': 0.30,  # 커밋 중 조향 변화 상한(분기 신속완성)
                     'fork_commit_frames': 30,  # 커밋 지속(제어 프레임, 30@20Hz≈1.5s)
+                    # 갈림길 커밋 트리거(근접/소실, B.3): 방향은 표지판을 멀리서
+                    # 봐도 일찍 래치(기억)하되, 실제 꺾기는 표지판이 가까워졌을 때만
+                    # 시작한다(멀리서 조기 분기해 코스 이탈하는 것 방지).
+                    # sign_proximity_metric: 근접 지표. 우리 차량은 카메라가 높아
+                    #   내려다보고 표지판이 낮게 설치돼 있으므로 'bottom_y'(표지판이
+                    #   프레임 아래로 내려오는 정도)가 가장 견고. 대안: 'area'(면적),
+                    #   'height'(박스 높이 — 높은 카메라에선 근접 시 포화·눌림이라 비권장).
+                    'sign_proximity_metric': ParameterValue(
+                        sign_proximity_metric, value_type=str),
+                    # sign_commit_ratio: 근접지표(0~1) ≥ 이 값이면 '가까움' → 커밋 시작.
+                    #   ⚠️ 실트랙 캘리브레이션 필수 — tools/sign_commit_calibration.py 로
+                    #   "이제 꺾어야 한다" 싶은 지점의 지표값(bottom_y=box y2/480)을 재고
+                    #   그 값 근처로 잡는다(크면 커밋 지연, 작으면 조기 분기).
+                    #   지표를 바꾸면 임계도 다시(bottom_y≈0.55~0.7, area≈0.03~0.10).
+                    #   런타임 인자로 노출 → sign_commit_ratio:=0.62 로 재빌드 없이 조정.
+                    'sign_commit_ratio': ParameterValue(
+                        sign_commit_ratio, value_type=float),
+                    # 소실 폴백(백업): 표지판이 프레임 밖으로 벗어날 때 대비. 지표가
+                    # sign_lost_min_ratio 이상 커진 뒤 sign_lost_commit_frames(YOLO
+                    # 프레임) 연속 미검출이면 커밋. 표지판이 계속 보이면 안 쓰임.
+                    'sign_lost_min_ratio': 0.45,
+                    'sign_lost_commit_frames': 3,
                     # 출발 직진 유예(제어 프레임): 출발 후 이 구간 동안 표지판 분기
                     # 억제·직진. 출발→S자→갈림길 순서 대응. 0=비활성.
                     'start_straight_frames': ParameterValue(
