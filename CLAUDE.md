@@ -126,7 +126,7 @@ ros2 launch control auto_driving.launch.py
   - **순항 throttle** — 출발 후 `cruise_throttle`(0.13) 고정.
 
 **완료된 배선 (과거 TODO → 코드 실측으로 해소):**
-- ✅ **차선 신호 배선 완료** — `opencv_node`가 `auto_driving.launch.py`에 포함(camera/control/joystick/battery/**opencv**/inference **6노드**)되어 `/lane/offset`을 발행하고, **구독측 `inference` 패키지도 신설·존재**(`src/inference/`: `yolo_onnx.py`/`inference_node.py`/`driving_policy.py`)하여 이를 구독한다. 발행·구독 양측 배선이 모두 실재한다. 프로파일 기본값은 대회 규정 트랙 `white_track`(brightness/light/split), 연습 트랙은 `lane_profile:=orange_track`. 상세·프로파일·정규화는 **10번** 참조.
+- ✅ **차선 신호 배선 완료** — `opencv_node`가 `auto_driving.launch.py`에 포함(camera/control/joystick/battery/**opencv**/inference **6노드**)되어 `/lane/offset`을 발행하고, **구독측 `inference` 패키지도 신설·존재**(`src/inference/`: `yolo_onnx.py`/`inference_node.py`/`driving_policy.py`)하여 이를 구독한다. 발행·구독 양측 배선이 모두 실재한다. 차선 검출은 **BEV(조감도) → 히스토그램(출발점) → 슬라이딩 윈도우 → 2차 함수 적합** 방식으로 곡선·직선을 모두 인식한다(옛 Hough/밴드무게중심 방식 폐기 — 상세·정정은 10번). 프로파일 기본값은 대회 규정 트랙 `white_track`(brightness/light), 연습 트랙은 `lane_profile:=orange_track`. 상세·프로파일·정규화는 **10번** 참조.
    - ⚠️ **8.2(토픽 슬래시 불일치)와 맞물리는 검증 포인트**: `opencv_node`가 발행하는 차선 토픽명(`lane_offset_topic` 기본값 `/lane/offset`)과 `inference_node`의 `lane_offset_topic` 기본값(`/lane/offset`)이 **양쪽에서 정확히 일치**해야 함. 8.2의 절대/상대(슬래시 有/無) 표기 불일치가 재발하면 — 예: 한쪽 `/lane/offset`, 다른 쪽 `lane/offset`(네임스페이스 상대) — **두 노드가 정상 기동해도 토픽이 연결되지 않아 조향이 계속 중립 유지**된다. 발행/구독 자체는 에러 없이 떠서 원인 파악이 특히 어렵다. **결론: 절대표기 `/lane/offset`으로 통일**(10번 "토픽명 슬래시 표기 최종 통일안"). 보드 실행 시 `ros2 topic info /lane/offset`로 pub/sub 연결을 확인할 것.
 
 **남은 작업:**
@@ -191,7 +191,8 @@ ros2 launch control auto_driving.launch.py
 - ✅ (2026-07 코드 실측 확정) **`opencv_node`는 `auto_driving.launch.py`에 포함**됨(camera/control/joystick/battery/opencv/inference **6노드**). `/lane/offset` 발행측 배선 완료.
 - ✅ (2026-07 신설) **`inference` 패키지 골격을 실제로 신설**했다(과거 문서의 "구현·검증 완료" 서술과 달리 이전엔 워크스페이스에 부재했음). 구성: `inference/yolo_onnx.py`(ONNX 래퍼), `inference/inference_node.py`(ROS 배선), **`inference/driving_policy.py`(순수 주행 정책 — ROS/cv2 비의존, 단위 테스트 포함)**. `/camera/image/compressed`+`/lane/offset` → `/control` 경로가 배선됨. **주의(온디바이스 미검증)**: ① `onnxruntime`은 pip(user-site) 설치 필요(10.2), ② 모델 `models/best.onnx` 없으면 노드가 **degraded(정지·중립) 모드**로 기동(예외 안전), ③ 이 개발 박스엔 rclpy/cv2/onnxruntime 부재라 **주행 정책 순수 로직만 단위 테스트 완료**(`test/test_driving_policy.py` 7 PASS), 엔드투엔드는 보드 재검증 필요. 상세는 10.2.
 - 추론 노드 입출력 인터페이스 / `/control` 메시지 타입: **구현 완료(10.2).** 입력 `/camera/image/compressed`(sensor_msgs/CompressedImage), 출력 `/control`(control_msgs/Control: header, steering, throttle). 부록 E.4 참조.
-- 카메라/차선 OpenCV 임계값 (`opencv/lane_detect.py` + `opencv_node.py` 실측):
+- 카메라/차선 OpenCV (`opencv/lane_detect.py` + `opencv_node.py` 실측 — BEV+슬라이딩 윈도우):
+  - **검출 방식(전면 교체, 2026-07)**: 옛 Hough 라인/밴드 무게중심 방식을 **폐기**하고 **BEV(Bird's Eye View) → 히스토그램(출발점) → 슬라이딩 윈도우 → 2차 함수 적합** 파이프라인으로 곡선·직선을 모두 인식한다. 프레임당: ① 이진화(brightness/color) → ② BEV 원근변환(사다리꼴 4점→직사각형 조감도) → ③ BEV 하단 열 합 히스토그램으로 좌/우 출발 x 탐색 → ④ 슬라이딩 윈도우로 차선 픽셀 수집(`minpix` 넘으면 재중심화) → ⑤ 좌/우 각각 2차 함수 `x=a·y²+b·y+c` 적합 → ⑥ 차선 중앙(near/far)과 카메라 중심 편차로 offset/curvature.
   - **두 트랙의 존재(중요)**: 특성이 반대인 두 트랙을 **프로파일**로 보존하며, **기본은 대회 규정 트랙**이다.
     - **대회 규정 트랙 = `white_track`(기본)**: **검은 바닥 + 양쪽 흰 경계선.** 차량은 좌우 흰 경계선의 중점을 추종. 전략 = `method='brightness'`, `polarity='light'`(어두운 바닥 위 밝은 선), **`split_lanes=True`**.
     - **연습 트랙 = `orange_track`(대안, 현재 유일 실주행 테스트 가능)**: 회색 바닥 + 주황 라인. `method='color'`, `hsv_lower=[5,80,80]`/`hsv_upper=[22,255,255]`(OpenCV H 0~180, 주황≈H5~22), `polarity='dark'`, `split_lanes=False`.
@@ -461,6 +462,7 @@ joystick_msgs/Joystick.msg
 | **joystick_msgs/Joystick** | `joystick_node` | `control_node`, `monitor_node` | `joystick` |
 | **sensor_msgs/CompressedImage** | `camera_node` | `opencv_node`, `monitor_node` | `/camera/image/compressed` |
 | **sensor_msgs/CompressedImage** (전처리) | `opencv_node` (gray/blur/edge) | `monitor_node` (debug_image=true 시) | `/opencv/image/{grayscale,blur,edge}` |
+| **sensor_msgs/CompressedImage** (차선 디버그) | `opencv_node` (BEV+슬라이딩 윈도우 오버레이, publish_lane_debug=true 시) | (모니터/echo, BEV 4점 튜닝용) | `/opencv/image/lane` |
 | **std_msgs/Float32MultiArray** (차선 `[offset,valid,curvature]`) | `opencv_node` (publish_lane=true 시) | `inference_node` (조향 융합) | `/lane/offset` |
 | **std_msgs/String** (인식 결과 JSON, 디버그) | `inference_node` | (echo/모니터) | `/inference/detections` |
 
@@ -513,6 +515,7 @@ joystick_msgs/Joystick.msg
 ```
 camera_node   ──/camera/image/compressed (CompressedImage)──►  opencv_node, monitor_node
 opencv_node   ──/opencv/image/{grayscale,blur,edge} (Compressed)─►  monitor_node
+opencv_node   ──/opencv/image/lane (Compressed, BEV+슬라이딩 윈도우 오버레이)─►  monitor/echo   (publish_lane_debug=true 시)
 joystick_node ──/joystick (Joystick)──►  control_node, monitor_node
 opencv_node   ──/lane/offset (Float32MultiArray)──►  inference_node   (publish_lane=true 시)
 inference_node──/control (Control)──►  control_node, monitor_node   (YOLO26n 추론+주행 정책, 8.1)
