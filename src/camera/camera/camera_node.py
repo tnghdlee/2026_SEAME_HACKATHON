@@ -41,8 +41,10 @@ class CameraNode(Node):
         self.declare_parameter('usb_camera_device', '/dev/video1')
         self.declare_parameter('mipi_camera_device', '/dev/video0')
         self.declare_parameter('flip_method', 'none')
-        self.declare_parameter('jpeg_quality', 90)
-        self.declare_parameter('debug_log', True)
+        # q90 은 데이터량이 커 인코딩·전송 지연을 늘린다. 비전용은 80 이면 충분.
+        self.declare_parameter('jpeg_quality', 80)
+        # 매 프레임 로깅은 30Hz I/O 로 콜백을 느리게 만든다. 기본 off.
+        self.declare_parameter('debug_log', False)
 
         self.vehicle_config_file = os.path.expanduser(
             str(self.get_parameter('vehicle_config_file').value)
@@ -80,11 +82,13 @@ class CameraNode(Node):
         # 회전 코드 사전 계산. 알 수 없는 값은 회전 없음으로 처리.
         self.rotate_code = _FLIP_MAP.get(str(flip_method).strip().lower(), None)
 
-        # QoS compatible with web_video_server and monitor subscribers.
+        # 센서 스트림용 QoS: 최신 프레임만 유지(depth=1) + BEST_EFFORT.
+        # RELIABLE+depth10 은 느린 구독자에서 재전송/큐잉으로 지연을 누적시킨다.
+        # 지연보다 최신성이 중요한 카메라 영상은 BEST_EFFORT 가 표준.
         self.image_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
-            depth=10,
-            reliability=ReliabilityPolicy.RELIABLE,
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
         )
         self.publisher_ = self.create_publisher(CompressedImage, publish_topic, self.image_qos)
@@ -192,6 +196,9 @@ class CameraNode(Node):
 
             if fourcc is not None:
                 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
+            # 드라이버 버퍼를 1프레임으로 줄여 낡은 프레임 누적(지연)을 방지.
+            # 타이머 콜백이 캡처 FPS를 못 따라가도 항상 최신 프레임에 가깝게 읽는다.
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             # 설정값으로 요청. 미지원 해상도면 드라이버가 가장 가까운 값으로 맞춘다.
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.image_width)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.image_height)

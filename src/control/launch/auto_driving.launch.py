@@ -126,13 +126,15 @@ def generate_launch_description():
                     # 명시하면 프리셋을 덮어쓴다(opencv_node 참조).
                     'lane_profile': lane_profile,
                     # 아래 값은 발행 해상도(vehicle_config IMAGE_WIDTH/HEIGHT,
-                    # 800×600) 기준. lane_block_size·morph_ksize 는 BEV warp 전
-                    # 원본 프레임에 적용되므로 해상도에 비례해 스케일했다(×2.5).
+                    # 640×480) 기준. lane_block_size·morph_ksize 는 BEV warp 전
+                    # 원본 프레임에 적용되므로 해상도에 비례해 스케일했다(×2.0).
+                    # lane_valid_min_px 는 고정 크기 BEV(200×240) 마스크에 대한
+                    # 값이라 입력 해상도와 무관 → 유지.
                     # ⚠️ BEV 4점(bev_src_*)·슬라이딩 윈도우 param 은 opencv_node
                     # 기본값을 쓰며 실트랙 캘리브레이션 대상(CLAUDE.md 10 참조).
                     'lane_valid_min_px': 250,  # BEV 이진 마스크 픽셀 하한(미만 조기 무효)
-                    'morph_ksize': 7,          # 3 × 2.5 — 디노이즈 열림 커널(원본)
-                    'lane_block_size': 63,     # 25 × 2.5 — 적응형 임계값 창(홀수, 원본)
+                    'morph_ksize': 5,          # 3 × 2.0 — 디노이즈 열림 커널(원본, 홀수)
+                    'lane_block_size': 51,     # 25 × 2.0 — 적응형 임계값 창(홀수, 원본)
                     'debug_log': False,
                 },
             ],

@@ -126,10 +126,12 @@ class OpenCvNode(Node):
         if not 0 <= self.jpeg_quality <= 100:
             raise ValueError('jpeg_quality must be in range [0, 100]')
 
+        # 센서 영상용 QoS: 최신 프레임만(depth=1) + BEST_EFFORT.
+        # 카메라 발행자와 일치시켜 지연 누적을 막는다(camera_node 와 동일 프로파일).
         image_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
-            depth=10,
-            reliability=ReliabilityPolicy.RELIABLE,
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
         )
 

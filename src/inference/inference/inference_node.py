@@ -163,10 +163,12 @@ class InferenceNode(Node):
             self.get_logger().error(
                 f'YOLO 모델 로드 실패 → degraded(정지) 모드: {exc}')
 
+        # 센서 영상용 QoS: 최신 프레임만(depth=1) + BEST_EFFORT.
+        # 카메라/opencv 발행자와 일치. 추론이 느려도 낡은 프레임이 큐잉되지 않는다.
         image_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
-            depth=10,
-            reliability=ReliabilityPolicy.RELIABLE,
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
         )
         # 콜백 그룹 분리 → MultiThreadedExecutor 에서 각기 다른 스레드로 동시 실행.

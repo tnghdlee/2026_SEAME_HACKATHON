@@ -9,6 +9,7 @@ from joystick_msgs.msg import Joystick
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CompressedImage
 import yaml
 
@@ -166,30 +167,38 @@ class MonitorNode(Node):
             self.battery_callback,
             10,
         )
+        # 영상 토픽은 카메라/opencv 발행자(BEST_EFFORT+depth1)와 QoS 를 일치시킨다.
+        # RELIABLE 로 두면 발행자와 비호환이라 대시보드에 영상이 안 뜬다.
+        image_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+        )
         self.create_subscription(
             CompressedImage,
             self.image_topic,
             self.image_callback,
-            10,
+            image_qos,
         )
         if self.debug_image:
             self.create_subscription(
                 CompressedImage,
                 self.opencv_grayscale_topic,
                 self.debug_grayscale_callback,
-                10,
+                image_qos,
             )
             self.create_subscription(
                 CompressedImage,
                 self.opencv_blur_topic,
                 self.debug_blur_callback,
-                10,
+                image_qos,
             )
             self.create_subscription(
                 CompressedImage,
                 self.opencv_edge_topic,
                 self.debug_edge_callback,
-                10,
+                image_qos,
             )
         self.create_subscription(
             Control,
