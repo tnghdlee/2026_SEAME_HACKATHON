@@ -50,6 +50,11 @@ def default_params():
         'stop_confirm_frames': 2,    # 빨간불 정지(B.6)
         # 출발 게이트
         'require_green_start': True,
+        # 신호등(빨강/초록) 공통 ROI 게이팅: 신호등은 트랙 위쪽에 설치되므로 검출
+        # 박스의 세로 중심이 프레임 높이의 이 비율보다 아래면(=하단) 오검출로 보고
+        # 무시한다. 빨강·초록 둘 다에 적용(상단 50% 로 제한). frame_height 가
+        # on_detections 에 전달될 때만 적용(순수 단위 테스트는 미전달 → 종전 동작).
+        'light_roi_top_ratio': 0.5,
         # 빨간불 오검출(ArUco 동적 장애물 구간의 '빨간 바닥') 배제 — 기하 게이팅.
         # 실제 신호등은 프레임 상단에 작게 잡히고, 빨간 바닥은 하단에 크게 잡힌다.
         # 이 두 값은 on_detections 에 frame_height 가 전달될 때만 적용된다(순수
@@ -175,6 +180,19 @@ class DrivingPolicy:
         self.last_offset = 0.0
         self.corner_hold = 0.0
 
+    def _light_in_roi(self, det, frame_height):
+        """신호등(빨강/초록) 검출을 프레임 상단 ROI 로 제한.
+
+        신호등은 트랙 위쪽에 설치되므로, 박스 세로 중심이 프레임 상단
+        light_roi_top_ratio(기본 0.5=상단 50%) 안에 있을 때만 유효로 본다.
+        하단 검출은 바닥 반사·배경 오검출로 배제한다. frame_height 미전달
+        (순수 단위 테스트)시엔 기하 정보가 없어 필터 미적용(종전 동작 유지).
+        """
+        if not frame_height:
+            return True
+        cy = 0.5 * (det.y1 + det.y2)          # 박스 세로 중심
+        return cy <= self.p['light_roi_top_ratio'] * float(frame_height)
+
     def _redlight_is_real(self, det, frame_height):
         """빨간불 검출이 실제 신호등인지(바닥 오검출이 아닌지) 기하로 판정.
 
@@ -218,6 +236,9 @@ class DrivingPolicy:
             else:
                 thr = conf
             if d.score < thr:
+                continue
+            # 신호등(빨강/초록)은 상단 ROI 로 제한(신호등은 트랙 위쪽).
+            if cls in (REDLIGHT, GREENLIGHT) and not self._light_in_roi(d, frame_height):
                 continue
             if cls == REDLIGHT and not self._redlight_is_real(d, frame_height):
                 continue

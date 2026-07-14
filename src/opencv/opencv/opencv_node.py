@@ -77,6 +77,15 @@ class OpenCvNode(Node):
         self.declare_parameter('hist_ratio', 0.5)     # 히스토그램에 쓸 하단 비율
         self.declare_parameter('min_lane_px', 200)    # 한쪽 라인 인정 최소 누적 픽셀
         self.declare_parameter('lane_width_ratio', 0.55)  # 한쪽 소실 폴백 차폭(BEV 폭 비율)
+        # 가로선(정지선·격자선·체커보드) 제거: BEV 한 행의 켜진 픽셀 수가 폭의 이 비율
+        # 이상이면 그 행을 가로선 후보로 본다(행 밀도 방식 — 끊긴 정지선도 잡음). 0=비활성.
+        # 세로/곡선 차선은 행당 두께(수 px)만 차지해 안전. 체커보드(출발/정지선)는 흑백
+        # 교차라 행당 흰 픽셀이 ~50%뿐이므로 임계를 0.35 로 둬 확실히 밴드를 잡는다.
+        # 정상 차선 오제거 시 키우고, 가로선이 남으면 낮춘다.
+        self.declare_parameter('lane_horiz_filter_frac', 0.35)
+        # 가로선 후보 행 마스크를 세로로 이만큼(±px) 팽창해 체커보드 밴드의 임계 미달
+        # 행/가장자리까지 통째로 제거(gap-bridging). 체커보드가 남으면 키운다. 0=팽창 없음.
+        self.declare_parameter('lane_horiz_filter_pad', 6)
         # 좌/우 둘 다 적합됐을 때 near 간격이 BEV 폭의 이 비율보다 좁으면 같은
         # 라인에 두 윈도우가 겹쳐 잠긴 것으로 보고 픽셀 많은 쪽만 단일 라인으로
         # 강등한다(허위 양쪽 검출 배제 → 중앙이 한 선으로 끌려가는 것 방지).
@@ -117,6 +126,8 @@ class OpenCvNode(Node):
         self.hist_ratio = float(self.get_parameter('hist_ratio').value)
         self.min_lane_px = int(self.get_parameter('min_lane_px').value)
         self.lane_width_ratio = float(self.get_parameter('lane_width_ratio').value)
+        self.lane_horiz_filter_frac = float(self.get_parameter('lane_horiz_filter_frac').value)
+        self.lane_horiz_filter_pad = int(self.get_parameter('lane_horiz_filter_pad').value)
         self.lane_min_sep_ratio = float(self.get_parameter('lane_min_sep_ratio').value)
         self.lane_width_ema = float(self.get_parameter('lane_width_ema').value)
 
@@ -233,6 +244,8 @@ class OpenCvNode(Node):
                 min_lane_px=self.min_lane_px,
                 lane_width_ratio=self.lane_width_ratio,
                 min_sep_ratio=self.lane_min_sep_ratio,
+                horiz_filter_frac=self.lane_horiz_filter_frac,
+                horiz_filter_pad=self.lane_horiz_filter_pad,
                 # 직전 양쪽 검출에서 실측·기억한 반차폭을 한쪽 소실 폴백에 되먹인다.
                 # 0(미측정)이면 함수가 lane_width_ratio 고정 추정으로 폴백.
                 prior_half_px=(self._lane_half_px if self._lane_half_px > 0.0

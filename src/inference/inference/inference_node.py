@@ -83,6 +83,7 @@ class InferenceNode(Node):
         self.declare_parameter('stop_confirm_frames', dp['stop_confirm_frames'])
         self.declare_parameter('require_green_start', dp['require_green_start'])
         self.declare_parameter('green_resumes_from_red', dp['green_resumes_from_red'])
+        self.declare_parameter('light_roi_top_ratio', dp['light_roi_top_ratio'])
         self.declare_parameter('redlight_max_y_ratio', dp['redlight_max_y_ratio'])
         self.declare_parameter('redlight_max_h_ratio', dp['redlight_max_h_ratio'])
         self.declare_parameter('green_start_conf', dp['green_start_conf'])
@@ -94,7 +95,8 @@ class InferenceNode(Node):
         # 초록 blob 을 찾을 세로 ROI(프레임 높이 비율). 신호등은 상단에 있으므로
         # 하단(바닥/잔디)을 배제해 오검출을 줄인다.
         self.declare_parameter('green_roi_top_ratio', 0.0)
-        self.declare_parameter('green_roi_bottom_ratio', 0.6)
+        # 신호등 인식 ROI 상단 50% 제한과 일치(초록 blob 폴백도 상단 절반만 탐색).
+        self.declare_parameter('green_roi_bottom_ratio', 0.5)
         # blob 최소 면적(px²). 먼 신호등은 작으므로 작게. 배경 초록 오검출 시 키움.
         self.declare_parameter('green_min_area', 8.0)
         # 폴백 blob 을 GREENLIGHT 로 합성할 때 부여하는 점수(green_start_conf 초과).
@@ -179,6 +181,8 @@ class InferenceNode(Node):
             'require_green_start': bool(self.get_parameter('require_green_start').value),
             'green_resumes_from_red': bool(
                 self.get_parameter('green_resumes_from_red').value),
+            'light_roi_top_ratio': float(
+                self.get_parameter('light_roi_top_ratio').value),
             'redlight_max_y_ratio': float(
                 self.get_parameter('redlight_max_y_ratio').value),
             'redlight_max_h_ratio': float(
