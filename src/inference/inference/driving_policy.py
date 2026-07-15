@@ -112,7 +112,7 @@ def default_params():
         # 같은 프레임(차선 기하)에서 나온 값이라 steer_sign 만 적용하고
         # drive_direction 미러링은 하지 않는다(turn_bias 와 다름). 직선 곡률
         # 노이즈(~0.04)엔 사실상 무영향, 실제 커브에서만 유효. 실차 튜닝 대상.
-        'curve_ff': 0.30,
+        'curve_ff': 0.5,
         'steer_slew': 0.15,
         # 갈림길
         'turn_bias': 0.5,            # 분기 방향 조향 바이어스(강하게 꺾어야 분기됨)
