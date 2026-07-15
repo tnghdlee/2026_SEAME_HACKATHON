@@ -70,10 +70,13 @@ class OpenCvNode(Node):
         # 차선 경계선을 추적·적합해 캘리브레이션한 값(대칭, 경계선을 BEV 15/85% 열에
         # 배치 → 직선 차선이 조감도에서 세로 평행선, offset=0=카메라 중심축).
         # ⚠️ 카메라 장착 위치/각도가 바뀌면 재캘리브레이션 필요(tools 로 재산출).
-        self.declare_parameter('bev_src_tl', [0.234, 0.62])
-        self.declare_parameter('bev_src_tr', [0.766, 0.62])
-        self.declare_parameter('bev_src_br', [0.982, 1.00])
-        self.declare_parameter('bev_src_bl', [0.018, 1.00])
+        # 2026-07-15 재캘리브레이션(bag_20260715_122828, 640x480, white_track):
+        #   직선 흰선 실측 far(y0.50) L0.34/R0.77, near(y1.00) L0.13/R0.97 →
+        #   경계선을 BEV 15/85% 로 매핑. 검증: 직선 offset≈0/bands=2, 600프레임 100% valid.
+        self.declare_parameter('bev_src_tl', [0.25, 0.50])
+        self.declare_parameter('bev_src_tr', [0.86, 0.50])
+        self.declare_parameter('bev_src_br', [1.15, 1.00])
+        self.declare_parameter('bev_src_bl', [-0.05, 1.00])
         self.declare_parameter('bev_warp_w', 200)
         self.declare_parameter('bev_warp_h', 240)
 

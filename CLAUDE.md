@@ -206,20 +206,20 @@ ros2 launch control auto_driving.launch.py
     - `white_track` 프리셋: `method=brightness`, `polarity=light`.
     - `orange_track` 프리셋: `method=color`, `polarity=dark`.
     - launch 인자로 노출: `ros2 launch control auto_driving.launch.py lane_profile:=orange_track`(연습 트랙 테스트 시). 기본 실행은 `white_track`.
-  - **BEV 원근변환 param(신규·핵심)**: `bev_src_tl`/`bev_src_tr`/`bev_src_br`/`bev_src_bl`(사다리꼴 4점, **원본 폭/높이 대비 0~1 비율**, 순서 좌상→우상→우하→좌하), `bev_warp_w=200`/`bev_warp_h=240`(조감도 결과 크기 px). 기본값 `tl=[0.20,0.62]`/`tr=[0.80,0.62]`/`br=[1.02,1.00]`/`bl=[-0.02,1.00]`은 320×160 기준 출발점일 뿐 **실차 캘리브레이션 필수**(아래).
+  - **BEV 원근변환 param(신규·핵심)**: `bev_src_tl`/`bev_src_tr`/`bev_src_br`/`bev_src_bl`(사다리꼴 4점, **원본 폭/높이 대비 0~1 비율**, 순서 좌상→우상→우하→좌하), `bev_warp_w=200`/`bev_warp_h=240`(조감도 결과 크기 px). 기본값 `tl=[0.25,0.50]`/`tr=[0.86,0.50]`/`br=[1.15,1.00]`/`bl=[-0.05,1.00]`은 **2026-07-15 실차 캘리브레이션 값**(bag_20260715_122828, 640×480, white_track). 직선 흰선 실측 far(y=0.50) L0.34/R0.77·near(y=1.00) L0.13/R0.97 을 BEV 15/85% 열에 매핑해 산출했고, 오프라인 검증에서 직선 offset≈0·bands=2, 전체 주행 600프레임 100% valid 확인. ⚠️ **카메라 장착 위치/각도가 바뀌면 재캘리브레이션 필수**(아래 절차).
   - **슬라이딩 윈도우 param(신규)**: `n_windows=10`, `margin=30`(윈도우 반너비 px, BEV), `minpix=25`(재중심화 최소 픽셀), `hist_ratio=0.5`(출발점 히스토그램에 쓸 하단 비율), `min_lane_px=200`(한쪽 라인 인정 최소 누적 픽셀), `lane_width_ratio=0.55`(한쪽 소실 폴백 차폭, BEV 폭 비율).
   - **유지 param**: `lane_valid_min_px=40`(BEV 이진 마스크 픽셀 하한, 미만이면 조기 무효), `lane_hsv_lower/upper`(주황 기본), `lane_block_size=25`(adaptive 이웃 창), `blur_ksize=5`, `morph_ksize=3`(형태학적 열림, `<=1` 비활성). ⚠️ (폐기 param — launch/`-p`에 남아 있으면 정리) `roi_top`/`roi_left`/`roi_right`/`lane_num_bands`/`lane_half_norm`/`side_min_px`/`split_lanes`/`hough_*`/`canny_*`. ROI 영역 선택은 BEV 상단 src 비율이 대신한다. vehicle_config `ROI_TOP=50`은 카메라 노드용이며 차선 검출엔 미사용.
   - **정규화 기준**: 오프셋은 **BEV 폭 중앙(warp_w/2) 기준**으로 정규화 → `offset=0`이 조감도 중심선을 뜻함. BEV 4점을 직선 구간에서 좌우 평행선으로 맞추면 이 중심선이 카메라 중심선과 일치한다(캘리브레이션의 목적). 부호 규약: `offset<0`=차선 중앙이 카메라 중심보다 왼쪽, `>0`=오른쪽(→조향 매핑은 하류 `steer_sign`).
   - **한쪽 차선 소실 폴백**: 좌/우 중 한쪽만 2차 적합에 성공하면(반대쪽 `min_lane_px` 미달) 검출된 라인에서 `lane_width_ratio`의 절반(BEV 폭 비율)만큼 옆으로 밀어 반대쪽을 추정(`valid_bands=1`, 신뢰도 낮음 표시). 좌우 모두 성공→`valid_bands=2`(중점), 둘 다 실패→`valid=False`.
   - **`/lane/offset` 산출**: near(BEV 하단 y=warp_h-1)·far(상단 y=0) 차선 중앙의 정규화 오프셋에서 `offset=(2·off_near+off_far)/3`(near 가중+far 피드포워드), `curvature=(off_far-off_near)/2` clip `[-1,1]`. **발행 배열은 `[offset, valid, curvature]` 3원소 유지**(문서화된 인터페이스 — `inference_node` PD 조향 그대로 호환). `LaneResult`의 `pixels`/`valid_bands`(0/1/2)·`left_detected`/`right_detected`·`overlay`는 진단·디버그용.
   - **디버그 영상**: `/opencv/image/edge`는 기존 `Canny(50,150)`(차선 오프셋과 무관한 monitor 시각화용) 유지. **신규 `/opencv/image/lane`**(`publish_lane_debug`, 기본 True)는 **BEV 조감도 + 슬라이딩 윈도우/적합 곡선/중앙선 오버레이** — BEV 4점 캘리브레이션·튜닝은 이 영상을 보고 한다.
-  - ⚠️ **BEV 4점 캘리브레이션(실차 필수·최우선)**: `bev_src_*` 기본값은 출발점일 뿐이다. 직선 구간에 차를 세우고 `/opencv/image/lane` 조감도에서 **좌우 차선이 세로로 나란한 평행선**이 되도록 상단 두 점(tl,tr)의 y·좌우 폭을 맞춰야 `offset=0`이 카메라 중심선을 뜻한다.
+  - ⚠️ **BEV 4점 캘리브레이션(카메라 이동 시 재수행)**: 현재 기본값은 2026-07-15 캘리브레이션 완료 값이다(위). 카메라를 건드렸으면 재수행: 직선 구간에 차를 세우고 `/opencv/image/lane` 조감도에서 **좌우 차선이 세로로 나란한 평행선**이 되도록 상단 두 점(tl,tr)의 y·좌우 폭을 맞춰야 `offset=0`이 카메라 중심선을 뜻한다. 오프라인 재산출은 `tools/lane_tuning_harness.py`로 캡처 bag/프레임에 대해 `--bev-*` 를 바꿔가며 검증(직선에서 offset≈0·bands=2 확인) 후 그 값을 `opencv_node.py` 기본값/launch param 으로 이관.
 
     ```bash
-    # BEV 4점 오버라이드 예시(조감도가 평행선이 되도록 실측 조정)
+    # BEV 4점 오버라이드 예시(조감도가 평행선이 되도록 실측 조정 — 현재 기본값과 동일)
     ros2 run opencv opencv_node --ros-args \
-      -p bev_src_tl:="[0.22, 0.60]" -p bev_src_tr:="[0.78, 0.60]" \
-      -p bev_src_br:="[1.05, 1.00]" -p bev_src_bl:="[-0.05, 1.00]"
+      -p bev_src_tl:="[0.25, 0.50]" -p bev_src_tr:="[0.86, 0.50]" \
+      -p bev_src_br:="[1.15, 1.00]" -p bev_src_bl:="[-0.05, 1.00]"
     ```
   - **진단 로깅**: 약 15프레임마다 `valid/offset/curvature/pixels/valid_bands/L/R` + 프로파일·method 출력 — `valid=False`인데 `pixels`가 `lane_valid_min_px` 근처면 BEV 안에 라인이 거의 없다는 뜻(**BEV 4점**/HSV/threshold 재확인), `pixels=0`이면 원본에 검출 색/명암 없음(라인 색/조명 재확인).
   - **검증(차량 없이) — ⚠️ 테스트 파일 미작성(TODO)**: `compute_lane_offset`은 순수 함수(ROS 비의존)라 합성 이미지로 오프라인 단위 테스트가 가능하다. 다만 **`opencv/test/test_lane_detect.py`는 현재 워크스페이스에 존재하지 않는다**(2026-07 코드 실측 — 과거 문서의 "7 PASS" 서술은 선반영이었고 파일 부재를 확인함. `src/opencv/opencv/`에는 `lane_detect.py`/`opencv_node.py`/`__init__.py`만 있음). 작성 시 커버할 케이스: (a) 출발점 히스토그램, (b) 대칭 직선→offset≈0·curvature≈0, (c) 우측 이동→+offset, (d) 우커브→+curvature, (e) 좌커브→−curvature, (f) 한쪽 소실→`valid_bands=1` 폴백, (g) 미검출→`valid=False`. cv2+numpy 있는 개발 박스에서 실행 가능. 실트랙 BEV 4점·임계값 튜닝은 보드에서 재실행. (참고: `inference` 패키지의 `test/test_driving_policy.py`는 실재하며 별개다.)
