@@ -50,11 +50,26 @@ def default_params():
         'stop_confirm_frames': 2,    # 빨간불 정지(B.6)
         # 출발 게이트
         'require_green_start': True,
+        # 빨강 소멸 출발(대안 트리거): 대기 중 켜진 빨간불이 '확정 정지(red_stopped)'
+        # 될 만큼 확실히 잡힌 뒤, 빨강이 red_gone_frames(YOLO 프레임) 연속 사라지면
+        # = 초록 점등으로 보고 출발한다. 초록 검출이 약해도(빨강은 강함) 출발을
+        # 놓치지 않기 위한 것으로, 기존 초록 확정 출발과 병행(둘 중 뭐라도 출발).
+        # 전제: 대기 중 신호등이 빨강을 표시(사용자 확인). red_gone_frames 는 빨강
+        # 검출이 간헐적으로 깜빡여도 오출발하지 않도록 실차 튜닝(크면 반응 느림).
+        'start_on_red_gone': True,
+        'red_gone_frames': 5,
         # 신호등(빨강/초록) 공통 ROI 게이팅: 신호등은 트랙 위쪽에 설치되므로 검출
         # 박스의 세로 중심이 프레임 높이의 이 비율보다 아래면(=하단) 오검출로 보고
         # 무시한다. 빨강·초록 둘 다에 적용(상단 50% 로 제한). frame_height 가
         # on_detections 에 전달될 때만 적용(순수 단위 테스트는 미전달 → 종전 동작).
         'light_roi_top_ratio': 0.5,
+        # 신호등(빨강/초록) 공통 가로 ROI 게이팅: 신호등이 화면의 특정 가로 영역에만
+        # 보일 때(예: 좌상단 설치), 그 밖(반대쪽·중앙)의 오검출을 배제한다. 박스
+        # 세로 중심의 가로 위치(cx)가 프레임 폭의 [x_min, x_max] 안일 때만 유효.
+        # 기본값 0.0~1.0=전체 폭(가로 제한 없음, 종전 동작). frame_width 가
+        # on_detections 에 전달될 때만 적용(순수 단위 테스트는 미전달 → 종전 동작).
+        'light_roi_x_min': 0.0,
+        'light_roi_x_max': 1.0,
         # 빨간불 오검출(ArUco 동적 장애물 구간의 '빨간 바닥') 배제 — 기하 게이팅.
         # 실제 신호등은 프레임 상단에 작게 잡히고, 빨간 바닥은 하단에 크게 잡힌다.
         # 이 두 값은 on_detections 에 frame_height 가 전달될 때만 적용된다(순수
@@ -79,13 +94,13 @@ def default_params():
         'start_kick_frames': 40,
         # throttle
         'cruise_throttle': 0.18,
-        'corner_throttle': 0.18,
+        'corner_throttle': 0.17,
         'turn_throttle': 0.18,
         'lane_lost_throttle': 0.18,
         # 조향 감속: 조향 명령이 중립(trim)에서 steer_throttle_threshold 이상
         # 벗어나면(=바퀴를 꺾는 중) throttle 을 steer_throttle 로 낮춘다. 차선
         # 곡률 기반 corner_throttle 과 별개로, 실제 조향각에 직접 반응한다.
-        'steer_throttle': 0.18,
+        'steer_throttle': 0.17,
         'steer_throttle_threshold': 0.05,
         # 커브 판정
         'corner_curvature_threshold': 0.30,
@@ -104,7 +119,7 @@ def default_params():
         'symmetric_steer': True,
         'steer_sign': -1.0,
         'steer_kp': 0.4,
-        'steer_kd': 0.3,
+        'steer_kd': 0.5,
         # 조향 데드밴드: |offset|<이 값이면 비례항 0(직선 지그재그/hunting 방지).
         'steer_deadband': 0.04,
         # 곡률 피드포워드(sim_line_260707_fix.py 에서 이식): 다가오는 커브의
@@ -270,6 +285,7 @@ class DrivingPolicy:
         # --- 연속 프레임 스트릭 ---
         self._green_streak = 0
         self._red_streak = 0
+        self._red_gone_streak = 0     # red_stopped 무장 후 빨강 연속 미검출(빨강 소멸 출발)
         self._left_streak = 0
         self._right_streak = 0
 
@@ -288,18 +304,29 @@ class DrivingPolicy:
         else:
             self._steer_lo, self._steer_hi = -1.0, 1.0
 
-    def _light_in_roi(self, det, frame_height):
-        """신호등(빨강/초록) 검출을 프레임 상단 ROI 로 제한.
+    def _light_in_roi(self, det, frame_height, frame_width=None):
+        """신호등(빨강/초록) 검출을 프레임 상단(+선택적 가로) ROI 로 제한.
 
         신호등은 트랙 위쪽에 설치되므로, 박스 세로 중심이 프레임 상단
         light_roi_top_ratio(기본 0.5=상단 50%) 안에 있을 때만 유효로 본다.
-        하단 검출은 바닥 반사·배경 오검출로 배제한다. frame_height 미전달
-        (순수 단위 테스트)시엔 기하 정보가 없어 필터 미적용(종전 동작 유지).
+        하단 검출은 바닥 반사·배경 오검출로 배제한다. 추가로 frame_width 가
+        전달되면 박스 가로 중심(cx)이 [light_roi_x_min, light_roi_x_max]×폭 안일
+        때만 유효로 봐, 신호등이 좌/우 특정 영역에만 보일 때 반대쪽 오검출을
+        배제한다(기본 0~1=가로 제한 없음). frame_height/width 미전달(순수 단위
+        테스트)시엔 해당 축 필터 미적용(종전 동작 유지).
         """
         if not frame_height:
             return True
         cy = 0.5 * (det.y1 + det.y2)          # 박스 세로 중심
-        return cy <= self.p['light_roi_top_ratio'] * float(frame_height)
+        if cy > self.p['light_roi_top_ratio'] * float(frame_height):
+            return False
+        if frame_width:
+            cx = 0.5 * (det.x1 + det.x2)      # 박스 가로 중심
+            w = float(frame_width)
+            if (cx < self.p['light_roi_x_min'] * w
+                    or cx > self.p['light_roi_x_max'] * w):
+                return False
+        return True
 
     def _redlight_is_real(self, det, frame_height):
         """빨간불 검출이 실제 신호등인지(바닥 오검출이 아닌지) 기하로 판정.
@@ -427,6 +454,35 @@ class DrivingPolicy:
         self.commit_triggered = True
         self.fork_remaining = self.p['fork_commit_frames']
 
+    def _begin_start(self, resume_from_red=True):
+        """출발 개시(초록 확정 또는 빨강 소멸 트리거 공통).
+
+        최초 전이(green_started False→True) 시 조향/분기 래치를 리셋해, 출발
+        직후 스테일 커밋으로 꺾이지 않고 직진/차선중앙에서 시작하게 한다. 출발
+        직진 유예·킥스타트도 이때 arm 한다. resume_from_red=True 면 빨간불 정지
+        (red_stopped)를 해제한다 — 출발선 빨강이 남아 throttle 을 0 으로 누르지
+        않게 한다(빨강 소멸 출발은 항상 해제, 초록 출발은 green_resumes_from_red).
+        """
+        p = self.p
+        if not self.green_started:
+            self.turn_intent = None
+            self.fork_remaining = 0
+            self.commit_triggered = False
+            self._sign_max_prox = 0.0
+            self._sign_absent_streak = 0
+            self._sign_seen_since_latch = 0
+            self._left_streak = 0
+            self._right_streak = 0
+            self.last_steer = p['steer_trim']
+            self.last_offset = 0.0
+            self.corner_hold = 0.0
+            self.start_straight_remaining = p['start_straight_frames']
+            self.start_kick_remaining = p['start_kick_frames']
+        self.green_started = True
+        if resume_from_red:
+            self.red_stopped = False
+            self._red_streak = 0
+
     # ---- YOLO 프레임 rate 로 호출 ----
     def on_detections(self, detections, frame_height=None, frame_width=None):
         """detections: class_id/score/x1..y2 속성을 가진 객체 리스트(YoloOnnx.Detection 등).
@@ -452,7 +508,7 @@ class DrivingPolicy:
             if d.score < thr:
                 continue
             # 신호등(빨강/초록)은 상단 ROI 로 제한(신호등은 트랙 위쪽).
-            if cls in (REDLIGHT, GREENLIGHT) and not self._light_in_roi(d, frame_height):
+            if cls in (REDLIGHT, GREENLIGHT) and not self._light_in_roi(d, frame_height, frame_width):
                 continue
             if cls == REDLIGHT and not self._redlight_is_real(d, frame_height):
                 continue
@@ -463,35 +519,26 @@ class DrivingPolicy:
         # 초록/빨강 스트릭 → 래치.
         self._green_streak = self._green_streak + 1 if GREENLIGHT in best else 0
         self._red_streak = self._red_streak + 1 if REDLIGHT in best else 0
+        # 초록 확정 출발: 출발 순간(최초 전이)에 조향/분기 래치를 리셋하고
+        # green_started 래치. 초록 재확정 시 빨간불 정지 해제는 green_resumes_from_red
+        # 를 따른다(도착 영구정지 유지 옵션). 상세는 _begin_start.
         if self._green_streak >= p['start_confirm_frames']:
-            # 출발 순간(최초 확정 전이): 조향을 중앙으로 정렬한다. 출발 전에
-            # 잘못 래치된 분기 의도(turn_intent)와 조향 상태를 리셋해, 초록불로
-            # 출발하자마자 스테일 커밋으로 꺾이지 않고 직진/차선중앙에서 시작한다.
-            # 출발 이후 실제로 표지판을 보면 다시 정상적으로 래치된다.
-            if not self.green_started:
-                self.turn_intent = None
-                self.fork_remaining = 0
-                self.commit_triggered = False
-                self._sign_max_prox = 0.0
-                self._sign_absent_streak = 0
-                self._sign_seen_since_latch = 0
-                self._left_streak = 0
-                self._right_streak = 0
-                self.last_steer = p['steer_trim']
-                self.last_offset = 0.0
-                self.corner_hold = 0.0
-                # 출발 직후 직진 유예 arm — 이 구간 동안 분기 래치 억제.
-                self.start_straight_remaining = p['start_straight_frames']
-                # 출발 킥스타트 arm — 조향 없이 고정 throttle 로 직진 출발.
-                self.start_kick_remaining = p['start_kick_frames']
-            self.green_started = True
-            # 초록불 재확정 시 빨간불 정지 해제(정지/재출발). 도착 영구정지를
-            # 원하면 green_resumes_from_red=False 로 끈다.
-            if p['green_resumes_from_red']:
-                self.red_stopped = False
-                self._red_streak = 0
+            self._begin_start(resume_from_red=p['green_resumes_from_red'])
         if self._red_streak >= p['stop_confirm_frames']:
             self.red_stopped = True
+
+        # 빨강 소멸 출발(대안 트리거, pre-start): 대기 중 빨강이 확정 정지(red_stopped)
+        # 될 만큼 확실히 잡힌 뒤, 빨강이 red_gone_frames 연속 사라지면 = 초록 점등으로
+        # 보고 출발한다(빨강은 강하게 검출되므로 약한 초록보다 신뢰↑). 빨강 재검출 시
+        # 카운터 리셋(간헐 깜빡 무시). green_started 후에는 동작 안 함(출발선 전용).
+        if (p['start_on_red_gone'] and not self.green_started
+                and self.red_stopped):
+            if REDLIGHT in best:
+                self._red_gone_streak = 0
+            else:
+                self._red_gone_streak += 1
+                if self._red_gone_streak >= p['red_gone_frames']:
+                    self._begin_start(resume_from_red=True)
 
         # 좌/우 margin 게이팅 후 스트릭 → turn_intent 래치(첫 확정 우선).
         side = resolve_sign(best.get(LEFT_SIGN, 0.0), best.get(RIGHT_SIGN, 0.0),
@@ -645,4 +692,5 @@ class DrivingPolicy:
             'sign_seen': self._sign_seen_since_latch,
             'corner_hold': round(self.corner_hold, 3),
             'start_kick_remaining': self.start_kick_remaining,
+            'red_gone': self._red_gone_streak,
         }

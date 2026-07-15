@@ -218,12 +218,13 @@ def generate_launch_description():
                     'model_path': model_path,
                     'vehicle_config_file': vehicle_config_path,
                     # --- 인식 확정 프레임(반응 지연 직결. YOLO ≈3Hz → 프레임당 ~0.3s) ---
-                    # 출발 초록불은 recall 우선(미인식=미션 실패)이나, 1프레임 확정은
-                    # 순간 오검출 1회에도 출발 게이트가 열려 차가 살짝 앞으로 나갔다가
-                    # 출발선 빨간불을 확정하고 멈추는 '출발 크리프'를 만든다. 실제 출발
-                    # 초록불은 켜지면 지속되므로 3프레임(≈1s) 연속 확정을 요구해도 진짜
-                    # 초록불은 놓치지 않고 순간 오출발만 제거된다.
-                    'start_confirm_frames': 3,  # 초록불 출발 (3≈1s, 순간 오출발 방지)
+                    # 출발 초록불은 recall 최우선(미인식=미션 실패, B.1). 실측 결과
+                    # 초록불 검출이 약하고(28프레임 중 3회, score 0.14~0.43) 흩어져
+                    # 잡혀서, 3프레임 연속 확정을 요구하면 연속 스트릭을 못 채워 출발
+                    # 자체가 안 됐다. 그래서 1프레임 확정으로 되돌려 약한/간헐 초록도
+                    # 즉시 출발하게 한다(미션 실패 회피 > 출발 크리프). 실제 출발선엔
+                    # 빨간불이 켜져 있어(빨강이 throttle 0 유지) 크리프는 상당 부분 억제.
+                    'start_confirm_frames': 1,  # 초록불 출발 (1≈0.3s, recall 우선)
                     # 출발 대기 중 초록불 전용 낮은 신뢰도 임계값(먼 신호등 recall).
                     # 출발 전 초록불에만 적용, 그 외/출발 후엔 conf_threshold(0.25).
                     'green_start_conf': 0.12,
@@ -240,9 +241,22 @@ def generate_launch_description():
                     # 잘못 래치된 방향을 교정). 초기 confirm_frames 보다 엄격하게.
                     'sign_revise_frames': 3,
                     'stop_confirm_frames': 2,   # 빨간불 정지
+                    # 빨강 소멸 출발(대안 트리거): 대기 빨강이 확정 정지된 뒤 빨강이
+                    # 이 프레임(YOLO rate) 연속 사라지면 초록 점등으로 보고 출발.
+                    # 초록 검출이 약해도 강한 빨강의 소멸로 출발(초록 확정과 병행).
+                    # 오출발하면 키우고(반응 느려짐), 출발이 느리면 줄인다.
+                    'start_on_red_gone': True,
+                    'red_gone_frames': 5,
                     # 신호등(빨강/초록) 공통 ROI: 박스 세로중심이 프레임 상단 이 비율
                     # 안일 때만 유효(신호등은 트랙 위쪽). 상단 70% 제한.
                     'light_roi_top_ratio': 0.7,
+                    # 신호등 가로 ROI: 현장 신호등이 화면 좌상단에 보이므로 박스 가로
+                    # 중심이 프레임 폭의 왼쪽 60% 안일 때만 유효 → 오른쪽·중앙의
+                    # 오검출(빨간 바닥 등) 배제. 빨강/초록 YOLO + 초록 HSV 폴백 공통.
+                    # ⚠️ 도착 빨간불도 이 가로 ROI 를 통과해야 인식됨 — 도착 신호등이
+                    # 좌상단이 아니면 x_max 를 키울 것(놓치면 B.6 +30s).
+                    'light_roi_x_min': 0.0,
+                    'light_roi_x_max': 0.6,
                     # 빨간불 오검출(ArUco 구간 '빨간 바닥') 배제 — 기하 게이팅.
                     # 실제 신호등은 프레임 상단에 작게, 빨간 바닥은 하단에 크게
                     # 잡힌다. 박스 세로중심이 프레임의 이 비율보다 아래면(바닥) 무시.
@@ -262,7 +276,7 @@ def generate_launch_description():
                     # --- throttle (트랙 현장 조정 대상) ---
                     'cruise_throttle': ParameterValue(
                         cruise_throttle, value_type=float),  # 직진 순항 (기본 0.18)
-                    'corner_throttle': 0.18,  # 코너 감속 throttle
+                    'corner_throttle': 0.17,  # 코너 감속 throttle(순항 0.18보다 낮춰 언더스티어 완화)
                     # 코너 판정 곡률 임계(정규화 [-1,1] 스케일). 실측 직선 curvature
                     # 노이즈가 ~0.04 이므로 0.30 은 사실상 발동 안 됨 → 0.12 로 낮춰
                     # 실제 커브에서 감속되게 함. ctrl 로그의 curv/corner_hold 로 튜닝.
@@ -272,12 +286,12 @@ def generate_launch_description():
                     'turn_throttle': 0.18,     # 갈림길 커밋 중 감속
                     # 조향 중(바퀴 꺾는 중) throttle: |steer-trim| 이 임계 이상이면
                     # 실제 조향각에 반응해 감속(곡률 기반 corner_throttle 과 별개).
-                    'steer_throttle': 0.18,
+                    'steer_throttle': 0.17,   # 조향 중 감속(순항 0.18보다 낮춰 언더스티어 완화)
                     'steer_throttle_threshold': 0.05,
                     # --- 조향 (트랙 현장 조정 대상) ---
                     'steer_sign': -1.0,        # 전체 조향 극성(벤치서 반대면 뒤집기)
                     'steer_kp': 0.4,           # 차선 오프셋 비례 게인(지그재그 억제 위해 하향)
-                    'steer_kd': 0.3,           # 미분 게인(떨림/진동 감쇠 강화)
+                    'steer_kd': 0.5,           # 미분 게인(코너 오버스티어/과조향 진동 감쇠 강화)
                     # 조향 데드밴드: |offset|<이 값이면 비례항 0. 직선에서 중앙 근처
                     # offset 노이즈로 좌우로 떠는(지그재그/hunting) 것을 막는다.
                     # 커지면 더 둔감(직진 안정)하나 실제 드리프트 복원이 늦어짐.

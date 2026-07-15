@@ -83,7 +83,13 @@ class InferenceNode(Node):
         self.declare_parameter('stop_confirm_frames', dp['stop_confirm_frames'])
         self.declare_parameter('require_green_start', dp['require_green_start'])
         self.declare_parameter('green_resumes_from_red', dp['green_resumes_from_red'])
+        # 빨강 소멸 출발(대안 트리거) — 대기 빨강이 사라지면 초록으로 보고 출발.
+        self.declare_parameter('start_on_red_gone', dp['start_on_red_gone'])
+        self.declare_parameter('red_gone_frames', dp['red_gone_frames'])
         self.declare_parameter('light_roi_top_ratio', dp['light_roi_top_ratio'])
+        # 신호등 가로 ROI(좌/우 특정 영역만 인정 — 반대쪽 오검출 배제). 0~1=전체 폭.
+        self.declare_parameter('light_roi_x_min', dp['light_roi_x_min'])
+        self.declare_parameter('light_roi_x_max', dp['light_roi_x_max'])
         self.declare_parameter('redlight_max_y_ratio', dp['redlight_max_y_ratio'])
         self.declare_parameter('redlight_max_h_ratio', dp['redlight_max_h_ratio'])
         self.declare_parameter('green_start_conf', dp['green_start_conf'])
@@ -174,6 +180,9 @@ class InferenceNode(Node):
         self._green_roi_bottom = float(self.get_parameter('green_roi_bottom_ratio').value)
         self._green_min_area = float(self.get_parameter('green_min_area').value)
         self._green_blob_score = float(self.get_parameter('green_blob_score').value)
+        # 초록 blob 폴백에도 신호등 가로 ROI(light_roi_x_*)를 적용해 반대쪽 오검출 배제.
+        self._light_roi_x_min = float(self.get_parameter('light_roi_x_min').value)
+        self._light_roi_x_max = float(self.get_parameter('light_roi_x_max').value)
         control_hz = float(self.get_parameter('control_hz').value)
         self.control_hz = control_hz if control_hz > 0 else 20.0
         lane_topic = str(self.get_parameter('lane_offset_topic').value)
@@ -196,8 +205,12 @@ class InferenceNode(Node):
             'require_green_start': bool(self.get_parameter('require_green_start').value),
             'green_resumes_from_red': bool(
                 self.get_parameter('green_resumes_from_red').value),
+            'start_on_red_gone': bool(self.get_parameter('start_on_red_gone').value),
+            'red_gone_frames': int(self.get_parameter('red_gone_frames').value),
             'light_roi_top_ratio': float(
                 self.get_parameter('light_roi_top_ratio').value),
+            'light_roi_x_min': float(self.get_parameter('light_roi_x_min').value),
+            'light_roi_x_max': float(self.get_parameter('light_roi_x_max').value),
             'redlight_max_y_ratio': float(
                 self.get_parameter('redlight_max_y_ratio').value),
             'redlight_max_h_ratio': float(
@@ -380,9 +393,12 @@ class InferenceNode(Node):
         h, w = frame.shape[:2]
         y0 = max(0, int(self._green_roi_top * h))
         y1 = min(h, int(self._green_roi_bottom * h))
-        if y1 <= y0:
+        # 가로 ROI(light_roi_x_*): 신호등이 좌/우 특정 영역에만 보일 때 반대쪽 배제.
+        x0 = max(0, int(self._light_roi_x_min * w))
+        x1 = min(w, int(self._light_roi_x_max * w))
+        if y1 <= y0 or x1 <= x0:
             return None
-        roi = frame[y0:y1]
+        roi = frame[y0:y1, x0:x1]
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         lo = np.array(self._green_hsv_lower, dtype=np.uint8)
         hi = np.array(self._green_hsv_upper, dtype=np.uint8)
@@ -394,9 +410,10 @@ class InferenceNode(Node):
         if cv2.contourArea(c) < self._green_min_area:
             return None
         x, y, bw, bh = cv2.boundingRect(c)
-        # ROI 좌표 → 원본 프레임 좌표(y0 오프셋 보정).
+        # ROI 좌표 → 원본 프레임 좌표(x0/y0 오프셋 보정).
         return Detection(GREENLIGHT, self._green_blob_score,
-                         float(x), float(y + y0), float(x + bw), float(y + bh + y0))
+                         float(x + x0), float(y + y0),
+                         float(x + bw + x0), float(y + bh + y0))
 
     # ---- ArUco 동적 장애물(B.4): 프레임당 검출 → 정지 상태머신 ----
     def _update_aruco(self, frame, cv2):
@@ -520,6 +537,7 @@ class InferenceNode(Node):
                 f'fork_remaining={st["fork_remaining"]} '
                 f'kick={st["start_kick_remaining"]} '
                 f'green={st["green_started"]} red={st["red_stopped"]} '
+                f'red_gone={st["red_gone"]} '
                 f'aruco_stop={aruco_blocked}')
 
 

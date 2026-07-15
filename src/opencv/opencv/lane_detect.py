@@ -435,8 +435,13 @@ def compute_lane_offset(
 
     off_near = norm(center_near)
     off_far = norm(center_far) if center_far is not None else off_near
-    # near 가중 + far 피드포워드(기존 규약 유지).
-    offset = float(np.clip((2.0 * off_near + off_far) / 3.0, -1.0, 1.0))
+    # near(현재 위치) 강가중 + far 소량. 코너에서 far 성분이 크면(차선이 앞에서
+    # 휘어) offset 이 커브 안쪽으로 쏠려 차가 실제 중앙이 아닌 안쪽 실선 위로
+    # 파고든다(코너 커팅). offset 은 '지금 두 선의 중앙 오차'에 집중시키고(near 7/8),
+    # 앞을 내다보는 커브 예측은 하류의 curve_ff(곡률 피드포워드)가 담당하게 한다.
+    # far 를 완전히 빼지 않는 건 near 단독의 순간 노이즈를 약간 완충하기 위함.
+    offset = float(np.clip((7.0 * off_near + off_far) / 8.0, -1.0, 1.0))
+    # curvature(곡률)는 near→far 중앙 변화 그대로 — curve_ff 예측 조향의 입력.
     curvature = float(np.clip((off_far - off_near) / 2.0, -1.0, 1.0))
 
     # 디버그 오버레이: 적합곡선 + 중앙선 표시
