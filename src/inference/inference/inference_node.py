@@ -109,9 +109,11 @@ class InferenceNode(Node):
         self.declare_parameter('steer_throttle_threshold', dp['steer_throttle_threshold'])
         self.declare_parameter('corner_curvature_threshold', dp['corner_curvature_threshold'])
         self.declare_parameter('curve_hold_decay', dp['curve_hold_decay'])
+        self.declare_parameter('symmetric_steer', dp['symmetric_steer'])
         self.declare_parameter('steer_sign', dp['steer_sign'])
         self.declare_parameter('steer_kp', dp['steer_kp'])
         self.declare_parameter('steer_kd', dp['steer_kd'])
+        self.declare_parameter('steer_deadband', dp['steer_deadband'])
         self.declare_parameter('curve_ff', dp['curve_ff'])
         self.declare_parameter('steer_slew', dp['steer_slew'])
         self.declare_parameter('turn_bias', dp['turn_bias'])
@@ -212,9 +214,11 @@ class InferenceNode(Node):
                 self.get_parameter('corner_curvature_threshold').value),
             'curve_hold_decay': float(self.get_parameter('curve_hold_decay').value),
             'steer_trim': steer_trim,
+            'symmetric_steer': bool(self.get_parameter('symmetric_steer').value),
             'steer_sign': float(self.get_parameter('steer_sign').value),
             'steer_kp': float(self.get_parameter('steer_kp').value),
             'steer_kd': float(self.get_parameter('steer_kd').value),
+            'steer_deadband': float(self.get_parameter('steer_deadband').value),
             'curve_ff': float(self.get_parameter('curve_ff').value),
             'steer_slew': float(self.get_parameter('steer_slew').value),
             'turn_bias': float(self.get_parameter('turn_bias').value),

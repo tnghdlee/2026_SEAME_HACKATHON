@@ -92,9 +92,21 @@ def default_params():
         'curve_hold_decay': 0.85,
         # 조향
         'steer_trim': 0.0,           # vehicle_config STEER_TRIM
+        # 트림 기준 대칭 조향 클램프. 서보는 명령 [-1,1] 을 기하학적 중심(1500µs)
+        # 기준 대칭으로 매핑하는데(d3racer.set_steering_percent), 정책 중립은
+        # steer_trim(≠0)이라 두 중심이 어긋난다. 그 결과 도달 가능한 최대 조향각이
+        # 좌우 비대칭이 된다: 한쪽 |1-trim|, 반대쪽 |1+trim|(trim=0.1 → 0.9 vs 1.1,
+        # ≈450µs vs 550µs). 여유 적은 쪽은 최대각 미달, 큰 쪽은 코너에서 과조향.
+        # True 면 조향 명령을 [trim-half, trim+half](half=1-|trim|)로 대칭 클램프해
+        # 강한 쪽을 약한 쪽에 맞춘다(과조향 제거). trim=0 이면 [-1,1] 로 무동작.
+        # ⚠️ 이는 SW 완화책이다 — 약한 쪽의 최대각을 늘리려면 서보 혼/링키지를
+        # 기계적으로 재중심화해 STEER_TRIM 을 0 근처로 낮춰야 양쪽 ±500µs 회복.
+        'symmetric_steer': True,
         'steer_sign': -1.0,
-        'steer_kp': 0.6,
-        'steer_kd': 0.15,
+        'steer_kp': 0.4,
+        'steer_kd': 0.3,
+        # 조향 데드밴드: |offset|<이 값이면 비례항 0(직선 지그재그/hunting 방지).
+        'steer_deadband': 0.04,
         # 곡률 피드포워드(sim_line_260707_fix.py 에서 이식): 다가오는 커브의
         # 곡률에 비례해 조향을 '미리' 꺾어 커브 진입 이탈을 줄인다. offset PD 와
         # 같은 프레임(차선 기하)에서 나온 값이라 steer_sign 만 적용하고
@@ -197,6 +209,21 @@ def _slew(cur, target, max_step):
     return cur + delta
 
 
+def _deadband(x, dead):
+    """중앙(0) 근처 |x|<dead 를 0 으로, 바깥은 dead 만큼 당겨 연속 유지(소프트 데드밴드).
+
+    직선에서 차선 offset 노이즈로 조향이 좌우로 떠는(hunting/지그재그) 것을 막는다.
+    임계에서 튐이 없도록 threshold 를 빼서 연속으로 이어붙인다.
+    """
+    if dead <= 0.0:
+        return x
+    if x > dead:
+        return x - dead
+    if x < -dead:
+        return x + dead
+    return 0.0
+
+
 def resolve_sign(left_score, right_score, margin, conf):
     """한 프레임의 좌/우 표지판 점수로 방향을 결정(margin 게이팅).
 
@@ -250,6 +277,16 @@ class DrivingPolicy:
         self.last_steer = p['steer_trim']
         self.last_offset = 0.0
         self.corner_hold = 0.0
+
+        # 트림 기준 대칭 조향 한계 사전 계산(step 에서 명령 클램프에 사용).
+        # half = 1-|trim| → lo=trim-half, hi=trim+half. trim=0 → [-1,1](무동작).
+        trim = p['steer_trim']
+        if p.get('symmetric_steer', True):
+            half = max(0.0, 1.0 - abs(trim))
+            self._steer_lo = trim - half
+            self._steer_hi = trim + half
+        else:
+            self._steer_lo, self._steer_hi = -1.0, 1.0
 
     def _light_in_roi(self, det, frame_height):
         """신호등(빨강/초록) 검출을 프레임 상단 ROI 로 제한.
@@ -517,14 +554,18 @@ class DrivingPolicy:
         # trim 기준 상대량(effort)만 계산해 두고, 커밋 여부에 따라 차선 기여도를
         # 조절한다. lane_effort = (차선추종 목표 - trim).
         if lane.valid:
-            offset = lane.offset
-            d_off = offset - self.last_offset
-            self.last_offset = offset
+            # 데드밴드를 먼저 먹여 중앙 근처 미세 offset 노이즈를 0 으로 만든다.
+            # 비례항뿐 아니라 미분항도 이 값 기준으로 계산해, 직선(±deadband 안)에서는
+            # 조향 변화가 정확히 0 이 되게 한다(미분항이 노이즈에 반응해 떠는 것 방지).
+            # deadband 를 넘는 실제 드리프트·커브에는 PD·곡률 피드포워드가 그대로 반응.
+            p_offset = _deadband(lane.offset, p['steer_deadband'])
+            d_off = p_offset - self.last_offset
+            self.last_offset = p_offset
             # PD(현재 오차) + 곡률 피드포워드(다가오는 커브 예측). curvature 는
             # offset 과 같은 부호 규약(먼 밴드가 오른쪽으로 휘면 +)이라 steer_sign
             # 만 곱한다 — drive_direction 미러링 대상 아님(offset PD 와 동일).
             lane_effort = p['steer_sign'] * (
-                p['steer_kp'] * offset
+                p['steer_kp'] * p_offset
                 + p['steer_kd'] * d_off
                 + p['curve_ff'] * lane.curvature)
         else:
@@ -558,10 +599,12 @@ class DrivingPolicy:
         else:
             target = trim + lane_effort
 
-        target = _clamp(target, -1.0, 1.0)
+        # 트림 기준 대칭 한계로 클램프(과조향 제거). trim=0 이면 [-1,1] 와 동일.
+        target = _clamp(target, self._steer_lo, self._steer_hi)
         # 커밋 중엔 분기를 신속히 완성하도록 슬루 상한을 완화(commit_steer_slew).
         slew_limit = p['commit_steer_slew'] if committing else p['steer_slew']
-        steer = _clamp(_slew(self.last_steer, target, slew_limit), -1.0, 1.0)
+        steer = _clamp(_slew(self.last_steer, target, slew_limit),
+                       self._steer_lo, self._steer_hi)
 
         # --- 커브 감속 홀드(진입 전/중 감속 유지) ---
         curv = abs(lane.curvature) if lane.valid else 0.0

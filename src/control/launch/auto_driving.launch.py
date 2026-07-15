@@ -70,7 +70,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'cruise_throttle',
-            default_value='0.17',
+            default_value='0.15',
             description='직진 순항 throttle. 조향만 점검하려면 0.0 으로 주면 바퀴가 안 돈다.',
         ),
         DeclareLaunchArgument(
@@ -252,29 +252,33 @@ def generate_launch_description():
                     'require_green_start': ParameterValue(
                         require_green_start, value_type=bool),
                     # --- 출발 킥스타트: 초록불 확정 직후 조향 없이 직진 출발 ---
-                    'start_kick_throttle': 0.17,   # 킥스타트 throttle(정지마찰 극복)
+                    'start_kick_throttle': 0.15,   # 킥스타트 throttle(정지마찰 극복)
                     # 킥스타트 지속(초). control_hz 로 환산. 0=킥 비활성.
                     'start_kick_seconds': ParameterValue(
                         start_kick_seconds, value_type=float),
                     # --- throttle (트랙 현장 조정 대상) ---
                     'cruise_throttle': ParameterValue(
-                        cruise_throttle, value_type=float),  # 직진 순항 (기본 0.17)
-                    'corner_throttle': 0.17,  # 코너 감속 throttle
+                        cruise_throttle, value_type=float),  # 직진 순항 (기본 0.15)
+                    'corner_throttle': 0.15,  # 코너 감속 throttle
                     # 코너 판정 곡률 임계(정규화 [-1,1] 스케일). 실측 직선 curvature
                     # 노이즈가 ~0.04 이므로 0.30 은 사실상 발동 안 됨 → 0.12 로 낮춰
                     # 실제 커브에서 감속되게 함. ctrl 로그의 curv/corner_hold 로 튜닝.
                     'corner_curvature_threshold': 0.12,
                     # 커브 진입 전 예측 감속 홀드 계수(0~1). 클수록 더 일찍/오래 감속 유지.
                     'curve_hold_decay': 0.85,
-                    'turn_throttle': 0.17,     # 갈림길 커밋 중 감속
+                    'turn_throttle': 0.15,     # 갈림길 커밋 중 감속
                     # 조향 중(바퀴 꺾는 중) throttle: |steer-trim| 이 임계 이상이면
                     # 실제 조향각에 반응해 감속(곡률 기반 corner_throttle 과 별개).
-                    'steer_throttle': 0.17,
+                    'steer_throttle': 0.15,
                     'steer_throttle_threshold': 0.05,
                     # --- 조향 (트랙 현장 조정 대상) ---
                     'steer_sign': -1.0,        # 전체 조향 극성(벤치서 반대면 뒤집기)
-                    'steer_kp': 0.6,           # 차선 오프셋 비례 게인
-                    'steer_kd': 0.15,          # 미분 게인(떨림 억제)
+                    'steer_kp': 0.4,           # 차선 오프셋 비례 게인(지그재그 억제 위해 하향)
+                    'steer_kd': 0.3,           # 미분 게인(떨림/진동 감쇠 강화)
+                    # 조향 데드밴드: |offset|<이 값이면 비례항 0. 직선에서 중앙 근처
+                    # offset 노이즈로 좌우로 떠는(지그재그/hunting) 것을 막는다.
+                    # 커지면 더 둔감(직진 안정)하나 실제 드리프트 복원이 늦어짐.
+                    'steer_deadband': 0.04,
                     # 곡률 피드포워드: 다가오는 커브를 미리 조향(이탈 방지). 직선
                     # curvature 노이즈(~0.04)엔 무영향, 실커브에서만 유효. 실차서
                     # ctrl 로그의 curv 대비 커브 진입 조기성이 부족하면 키운다.
@@ -317,7 +321,7 @@ def generate_launch_description():
                     'start_straight_frames': ParameterValue(
                         start_straight_frames, value_type=int),
                     # --- 속도 (트랙 현장 조정 대상) ---
-                    'lane_lost_throttle': 0.17,
+                    'lane_lost_throttle': 0.15,
                     # --- ArUco 동적 장애물 정지/재출발 (B.4) ---
                     # 장애물 마커 등장 시 정지, 소멸 시 재출발(정지 중 스탑워치 멈춤).
                     'aruco_enabled': True,
