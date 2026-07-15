@@ -75,17 +75,17 @@ def default_params():
         # throttle=start_kick_throttle 을 낸다. 이후 정상 주행(차선 추종)으로 전환.
         # 프레임 단위는 제어 프레임(control_hz). inference_node 가 start_kick_seconds
         # ×control_hz 로 환산해 start_kick_frames 를 덮어쓴다(기본 2s@20Hz=40).
-        'start_kick_throttle': 0.17,
+        'start_kick_throttle': 0.18,
         'start_kick_frames': 40,
         # throttle
-        'cruise_throttle': 0.17,
-        'corner_throttle': 0.17,
-        'turn_throttle': 0.17,
-        'lane_lost_throttle': 0.17,
+        'cruise_throttle': 0.18,
+        'corner_throttle': 0.18,
+        'turn_throttle': 0.18,
+        'lane_lost_throttle': 0.18,
         # 조향 감속: 조향 명령이 중립(trim)에서 steer_throttle_threshold 이상
         # 벗어나면(=바퀴를 꺾는 중) throttle 을 steer_throttle 로 낮춘다. 차선
         # 곡률 기반 corner_throttle 과 별개로, 실제 조향각에 직접 반응한다.
-        'steer_throttle': 0.17,
+        'steer_throttle': 0.18,
         'steer_throttle_threshold': 0.05,
         # 커브 판정
         'corner_curvature_threshold': 0.30,
@@ -112,7 +112,7 @@ def default_params():
         # 같은 프레임(차선 기하)에서 나온 값이라 steer_sign 만 적용하고
         # drive_direction 미러링은 하지 않는다(turn_bias 와 다름). 직선 곡률
         # 노이즈(~0.04)엔 사실상 무영향, 실제 커브에서만 유효. 실차 튜닝 대상.
-        'curve_ff': 0.5,
+        'curve_ff': 0.35,
         'steer_slew': 0.15,
         # 갈림길
         'turn_bias': 0.5,            # 분기 방향 조향 바이어스(강하게 꺾어야 분기됨)

@@ -70,7 +70,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'cruise_throttle',
-            default_value='0.16',
+            default_value='0.18',
             description='직진 순항 throttle. 조향만 점검하려면 0.0 으로 주면 바퀴가 안 돈다.',
         ),
         DeclareLaunchArgument(
@@ -218,9 +218,12 @@ def generate_launch_description():
                     'model_path': model_path,
                     'vehicle_config_file': vehicle_config_path,
                     # --- 인식 확정 프레임(반응 지연 직결. YOLO ≈3Hz → 프레임당 ~0.3s) ---
-                    # 출발 초록불은 recall 우선(미인식=미션 실패). 먼 신호등이
-                    # 간헐 검출돼도 즉시 출발하도록 1프레임 확정.
-                    'start_confirm_frames': 1,  # 초록불 출발 (1≈0.3s)
+                    # 출발 초록불은 recall 우선(미인식=미션 실패)이나, 1프레임 확정은
+                    # 순간 오검출 1회에도 출발 게이트가 열려 차가 살짝 앞으로 나갔다가
+                    # 출발선 빨간불을 확정하고 멈추는 '출발 크리프'를 만든다. 실제 출발
+                    # 초록불은 켜지면 지속되므로 3프레임(≈1s) 연속 확정을 요구해도 진짜
+                    # 초록불은 놓치지 않고 순간 오출발만 제거된다.
+                    'start_confirm_frames': 3,  # 초록불 출발 (3≈1s, 순간 오출발 방지)
                     # 출발 대기 중 초록불 전용 낮은 신뢰도 임계값(먼 신호등 recall).
                     # 출발 전 초록불에만 적용, 그 외/출발 후엔 conf_threshold(0.25).
                     'green_start_conf': 0.12,
@@ -252,24 +255,24 @@ def generate_launch_description():
                     'require_green_start': ParameterValue(
                         require_green_start, value_type=bool),
                     # --- 출발 킥스타트: 초록불 확정 직후 조향 없이 직진 출발 ---
-                    'start_kick_throttle': 0.16,   # 킥스타트 throttle(정지마찰 극복)
+                    'start_kick_throttle': 0.18,   # 킥스타트 throttle(정지마찰 극복)
                     # 킥스타트 지속(초). control_hz 로 환산. 0=킥 비활성.
                     'start_kick_seconds': ParameterValue(
                         start_kick_seconds, value_type=float),
                     # --- throttle (트랙 현장 조정 대상) ---
                     'cruise_throttle': ParameterValue(
-                        cruise_throttle, value_type=float),  # 직진 순항 (기본 0.16)
-                    'corner_throttle': 0.16,  # 코너 감속 throttle
+                        cruise_throttle, value_type=float),  # 직진 순항 (기본 0.18)
+                    'corner_throttle': 0.18,  # 코너 감속 throttle
                     # 코너 판정 곡률 임계(정규화 [-1,1] 스케일). 실측 직선 curvature
                     # 노이즈가 ~0.04 이므로 0.30 은 사실상 발동 안 됨 → 0.12 로 낮춰
                     # 실제 커브에서 감속되게 함. ctrl 로그의 curv/corner_hold 로 튜닝.
                     'corner_curvature_threshold': 0.12,
                     # 커브 진입 전 예측 감속 홀드 계수(0~1). 클수록 더 일찍/오래 감속 유지.
                     'curve_hold_decay': 0.85,
-                    'turn_throttle': 0.16,     # 갈림길 커밋 중 감속
+                    'turn_throttle': 0.18,     # 갈림길 커밋 중 감속
                     # 조향 중(바퀴 꺾는 중) throttle: |steer-trim| 이 임계 이상이면
                     # 실제 조향각에 반응해 감속(곡률 기반 corner_throttle 과 별개).
-                    'steer_throttle': 0.16,
+                    'steer_throttle': 0.18,
                     'steer_throttle_threshold': 0.05,
                     # --- 조향 (트랙 현장 조정 대상) ---
                     'steer_sign': -1.0,        # 전체 조향 극성(벤치서 반대면 뒤집기)
@@ -282,7 +285,7 @@ def generate_launch_description():
                     # 곡률 피드포워드: 다가오는 커브를 미리 조향(이탈 방지). 직선
                     # curvature 노이즈(~0.04)엔 무영향, 실커브에서만 유효. 실차서
                     # ctrl 로그의 curv 대비 커브 진입 조기성이 부족하면 키운다.
-                    'curve_ff': 0.5,
+                    'curve_ff': 0.35,
                     'steer_slew': 0.15,        # 프레임당 최대 조향 변화
                     # --- 갈림길 (트랙 현장 조정 대상) ---
                     'turn_bias': 0.7,          # 커밋 중 방향 바이어스 크기(강하게 꺾음)
@@ -321,7 +324,7 @@ def generate_launch_description():
                     'start_straight_frames': ParameterValue(
                         start_straight_frames, value_type=int),
                     # --- 속도 (트랙 현장 조정 대상) ---
-                    'lane_lost_throttle': 0.16,
+                    'lane_lost_throttle': 0.18,
                     # --- ArUco 동적 장애물 정지/재출발 (B.4) ---
                     # 장애물 마커 등장 시 정지, 소멸 시 재출발(정지 중 스탑워치 멈춤).
                     'aruco_enabled': True,
