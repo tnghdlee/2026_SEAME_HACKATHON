@@ -137,6 +137,15 @@ def default_params():
         # 표지판이 프레임 안에 계속 보이면 근접 임계가 먼저 걸려 이 백업은 안 쓰인다.
         'sign_lost_min_ratio': 0.45,
         'sign_lost_commit_frames': 3,
+        # 백스톱 타임아웃(YOLO 프레임): 방향을 래치한 뒤 '검출된' 표지판을 누적
+        # 이 프레임 수 이상 봤는데도 근접(sign_commit_ratio)/소실 트리거가 아직
+        # 커밋을 못 걸었으면(근접 임계 미달·검출 깜빡임 등 캘리브레이션 어긋남),
+        # 그대로 직진해 표지판을 들이받지 않도록 강제로 커밋한다. 누적 '검출'
+        # 프레임만 세므로 멀리서 잠깐 잡혔다 사라진 표지판(_sign_far_blip)에는
+        # 발동하지 않는다. 0 이면 비활성(종전 동작).
+        # ⚠️ 근본 해결은 sign_commit_ratio 캘리브레이션(tools/sign_commit_calibration.py).
+        #    이 값은 안전망이라 너무 작으면 갈림길 도달 전에 조기 커밋할 수 있다.
+        'sign_commit_timeout_frames': 10,
         # 출발 직진 유예(제어 프레임): 초록불 출발 확정 후 이 프레임 수 동안은
         # 표지판 분기 래치를 억제해 직진(차선 추종)한다. 실코스가 출발→S자→
         # 갈림길 순서이므로 출발 직후 (오)검출된 표지판으로 즉시 꺾이지 않게 한다.
@@ -198,6 +207,7 @@ class DrivingPolicy:
         self.commit_triggered = False
         self._sign_max_prox = 0.0      # 래치 후 표지판 최대 근접지표(소실 폴백용)
         self._sign_absent_streak = 0   # 래치 후 표지판 연속 미검출(YOLO 프레임)
+        self._sign_seen_since_latch = 0  # 래치 후 표지판을 본 누적 YOLO 프레임(백스톱)
         # 출발 직진 유예 잔여(제어 프레임). 출발 확정 전이에서 arm, step 에서 감소.
         self.start_straight_remaining = 0
         # 출발 킥스타트 잔여(제어 프레임). 초록불 확정 전이에서 arm, step 에서 감소.
@@ -280,6 +290,11 @@ class DrivingPolicy:
         - 소실 폴백(백업): 지표가 sign_lost_min_ratio 이상으로 커진 적 있고(가까이
           왔었고) 이후 sign_lost_commit_frames(YOLO 프레임) 연속 미검출이면,
           표지판이 프레임 밖으로 벗어난 것으로 보고 커밋.
+        - 백스톱 타임아웃: 래치 후 표지판을 '검출된' 상태로 누적
+          sign_commit_timeout_frames 프레임 이상 봤는데도 위 둘이 커밋을 못 걸었으면
+          (근접 임계 미달·검출 깜빡임 등 캘리브레이션 어긋남), 들이받기 전에 강제
+          커밋한다. 누적 '검출' 프레임만 세므로 멀리서 잠깐 잡혔다 사라진 표지판엔
+          발동하지 않는다(sign_commit_timeout_frames=0 이면 비활성).
         """
         p = self.p
         if not frame_height:
@@ -288,17 +303,25 @@ class DrivingPolicy:
         sign_cls = LEFT_SIGN if self.turn_intent == 'left' else RIGHT_SIGN
         det = best_box.get(sign_cls)
         if det is not None:
+            self._sign_seen_since_latch += 1
             prox = self._sign_proximity(det, frame_height, frame_width)
             if prox > self._sign_max_prox:
                 self._sign_max_prox = prox
             self._sign_absent_streak = 0
             if prox >= p['sign_commit_ratio']:
                 self._start_commit()           # 근접 → 커밋
+                return
         else:
             self._sign_absent_streak += 1
             if (self._sign_max_prox >= p['sign_lost_min_ratio']
                     and self._sign_absent_streak >= p['sign_lost_commit_frames']):
                 self._start_commit()           # 소실 폴백 → 커밋
+                return
+        # 백스톱: 근접·소실이 아직 커밋을 못 걸었어도, 표지판을 충분히 오래
+        # 본(누적) 뒤엔 강제로 커밋해 직진 충돌을 막는다.
+        timeout = p['sign_commit_timeout_frames']
+        if timeout and self._sign_seen_since_latch >= timeout:
+            self._start_commit()               # 백스톱 타임아웃 → 커밋
 
     def _start_commit(self):
         """커밋 개시: fork_remaining 을 채워 step 이 turn_bias 로 꺾게 한다."""
@@ -352,6 +375,7 @@ class DrivingPolicy:
                 self.commit_triggered = False
                 self._sign_max_prox = 0.0
                 self._sign_absent_streak = 0
+                self._sign_seen_since_latch = 0
                 self._left_streak = 0
                 self._right_streak = 0
                 self.last_steer = p['steer_trim']
@@ -389,10 +413,17 @@ class DrivingPolicy:
             self._right_streak = 0
 
         if self.turn_intent is None:
+            latched = None
             if self._left_streak >= p['confirm_frames']:
-                self.turn_intent = 'left'
+                latched = 'left'
             elif self._right_streak >= p['confirm_frames']:
-                self.turn_intent = 'right'
+                latched = 'right'
+            if latched is not None:
+                self.turn_intent = latched
+                # 커밋 트리거 상태를 래치 시점 기준으로 초기화(근접/소실/백스톱).
+                self._sign_max_prox = 0.0
+                self._sign_absent_streak = 0
+                self._sign_seen_since_latch = 0
 
         # 방향 래치와 실제 커밋(꺾기)의 분리: 방향은 위에서 멀리서도 일찍 래치하되,
         # fork_remaining(=꺾기 시작)은 표지판이 가까워졌을 때만 세팅한다. 멀리서
@@ -493,6 +524,7 @@ class DrivingPolicy:
             'turn_intent': self.turn_intent,
             'commit_triggered': self.commit_triggered,
             'fork_remaining': self.fork_remaining,
+            'sign_seen': self._sign_seen_since_latch,
             'corner_hold': round(self.corner_hold, 3),
             'start_kick_remaining': self.start_kick_remaining,
         }

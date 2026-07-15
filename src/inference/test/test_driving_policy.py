@@ -243,6 +243,47 @@ def test_sign_far_blip_no_loss_commit():
     assert not p.commit_triggered, '멀었던(위쪽) 표지판 소실은 커밋 트리거 아님'
 
 
+def test_sign_commit_timeout_backstop():
+    # 백스톱: 방향 래치 후 표지판이 계속 보이는데 근접(sign_commit_ratio) 임계에
+    # 못 미치고(캘리브레이션 어긋남) 소실도 안 되면, 누적 검출 프레임이
+    # sign_commit_timeout_frames 에 도달했을 때 강제 커밋해 직진 충돌을 막는다.
+    H = 480
+    p = DrivingPolicy({'require_green_start': False, 'confirm_frames': 2,
+                       'turn_bias': 0.5, 'steer_sign': 1.0, 'fork_commit_frames': 5,
+                       'steer_slew': 1.0, 'sign_proximity_metric': 'bottom_y',
+                       'sign_commit_ratio': 0.95,       # 근접은 사실상 안 걸림
+                       'sign_lost_commit_frames': 99,   # 소실 폴백도 끔
+                       'sign_commit_timeout_frames': 4})
+    # 하단 y2=0.50H(<0.95) 표지판이 계속 보임 → 근접/소실 어느 것도 커밋 안 함.
+    mid = Det(LEFT_SIGN, 0.9, x1=290, y1=0.40 * H, x2=340, y2=0.50 * H)
+    p.on_detections([mid], frame_height=H, frame_width=640)  # streak 1
+    p.on_detections([mid], frame_height=H, frame_width=640)  # streak 2 → 래치, seen=1
+    assert p.turn_intent == 'left' and not p.commit_triggered
+    p.on_detections([mid], frame_height=H, frame_width=640)  # seen=2
+    p.on_detections([mid], frame_height=H, frame_width=640)  # seen=3
+    assert not p.commit_triggered, '타임아웃(4) 전에는 커밋 안 함'
+    p.on_detections([mid], frame_height=H, frame_width=640)  # seen=4 → 백스톱 커밋
+    assert p.commit_triggered and p.fork_remaining == 5, '백스톱 타임아웃 → 커밋'
+    s, t = p.step(straight())
+    assert s < 0.0, '커밋 시작 → 좌조향 바이어스'
+    assert t == p.p['turn_throttle']
+
+
+def test_sign_commit_timeout_disabled():
+    # sign_commit_timeout_frames=0 이면 백스톱 비활성(종전 동작): 근접/소실이
+    # 안 걸리면 표지판을 오래 봐도 커밋하지 않는다.
+    H = 480
+    p = DrivingPolicy({'require_green_start': False, 'confirm_frames': 2,
+                       'steer_sign': 1.0, 'fork_commit_frames': 5, 'steer_slew': 1.0,
+                       'sign_proximity_metric': 'bottom_y', 'sign_commit_ratio': 0.95,
+                       'sign_lost_commit_frames': 99, 'sign_commit_timeout_frames': 0})
+    mid = Det(LEFT_SIGN, 0.9, x1=290, y1=0.40 * H, x2=340, y2=0.50 * H)
+    for _ in range(20):
+        p.on_detections([mid], frame_height=H, frame_width=640)
+    assert p.turn_intent == 'left'
+    assert not p.commit_triggered, '백스톱 0 이면 커밋 안 함(하위호환)'
+
+
 def test_sign_commit_backward_compat_no_frame_height():
     # frame_height 미전달 시엔 종전 동작: 래치 즉시 커밋(하위호환).
     p = DrivingPolicy({'require_green_start': False, 'confirm_frames': 2,

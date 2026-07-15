@@ -128,6 +128,10 @@ class InferenceNode(Node):
         self.declare_parameter('sign_commit_ratio', dp['sign_commit_ratio'])
         self.declare_parameter('sign_lost_min_ratio', dp['sign_lost_min_ratio'])
         self.declare_parameter('sign_lost_commit_frames', dp['sign_lost_commit_frames'])
+        # 백스톱: 방향 래치 후 표지판을 누적 이 프레임 이상 봤는데도 근접/소실이
+        # 커밋을 못 걸면 강제 커밋(직진 충돌 방지). 0=비활성. 근본 해결은
+        # sign_commit_ratio 캘리브레이션(tools/sign_commit_calibration.py).
+        self.declare_parameter('sign_commit_timeout_frames', dp['sign_commit_timeout_frames'])
         self.declare_parameter('start_straight_frames', dp['start_straight_frames'])
         self.declare_parameter('drive_direction', dp['drive_direction'])
         # 출발 킥스타트: 초록불 확정 직후 조향 없이 고정 throttle 로 직진하는 구간.
@@ -226,6 +230,8 @@ class InferenceNode(Node):
                 self.get_parameter('sign_lost_min_ratio').value),
             'sign_lost_commit_frames': int(
                 self.get_parameter('sign_lost_commit_frames').value),
+            'sign_commit_timeout_frames': int(
+                self.get_parameter('sign_commit_timeout_frames').value),
             'start_straight_frames': int(
                 self.get_parameter('start_straight_frames').value),
             'drive_direction': float(self.get_parameter('drive_direction').value),

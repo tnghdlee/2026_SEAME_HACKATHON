@@ -48,6 +48,9 @@ def generate_launch_description():
     # 노출한다. 재빌드 없이 sign_commit_ratio:=0.62 처럼 바로 조정.
     sign_proximity_metric = LaunchConfiguration('sign_proximity_metric')
     sign_commit_ratio = LaunchConfiguration('sign_commit_ratio')
+    # 갈림길 커밋 백스톱(직진 충돌 방지) — 표지판을 누적 이 프레임 이상 봤는데도
+    # 근접/소실이 커밋을 못 걸면 강제 커밋. 캘리브레이션 보조 안전망이라 노출.
+    sign_commit_timeout_frames = LaunchConfiguration('sign_commit_timeout_frames')
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -94,6 +97,14 @@ def generate_launch_description():
             default_value='0.60',
             description=('근접지표 ≥ 이 값이면 갈림길 커밋(꺾기) 시작. 실트랙에서 '
                          'tools/sign_commit_calibration.py 로 캘리브레이션.'),
+        ),
+        DeclareLaunchArgument(
+            'sign_commit_timeout_frames',
+            default_value='10',
+            description=('갈림길 커밋 백스톱(직진 충돌 방지). 방향 래치 후 표지판을 '
+                         '누적 이 프레임(YOLO rate) 이상 봤는데도 근접/소실이 커밋을 '
+                         '못 걸면 강제 커밋. 0=비활성. 조기 커밋하면 키우고, 계속 '
+                         '들이받으면 줄인다. 근본 해결은 sign_commit_ratio 캘리브레이션.'),
         ),
         Node(
             package='camera',
@@ -276,6 +287,11 @@ def generate_launch_description():
                     # 프레임) 연속 미검출이면 커밋. 표지판이 계속 보이면 안 쓰임.
                     'sign_lost_min_ratio': 0.45,
                     'sign_lost_commit_frames': 3,
+                    # 백스톱 타임아웃(직진 충돌 방지). 방향 래치 후 표지판을 누적
+                    # 이 프레임 이상 봤는데도 근접/소실이 커밋을 못 걸면 강제 커밋.
+                    # 근본 해결은 sign_commit_ratio 캘리브레이션(런타임 인자로 노출).
+                    'sign_commit_timeout_frames': ParameterValue(
+                        sign_commit_timeout_frames, value_type=int),
                     # 출발 직진 유예(제어 프레임): 출발 후 이 구간 동안 표지판 분기
                     # 억제·직진. 출발→S자→갈림길 순서 대응. 0=비활성.
                     'start_straight_frames': ParameterValue(
