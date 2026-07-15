@@ -47,9 +47,9 @@ class ArucoConfig:
     # 0.0 이면 게이팅 없음. 실측 튜닝 대상.
     min_area_ratio: float = 0.0
     # ROI(관심영역) 게이팅: 마커 '중심'이 이 정규화 사각형 안에 있을 때만 인정.
-    # (x0, y0, x1, y1), 각 0~1. 기본 = 화면 하단 60%, 가로 중앙 60% (내 주행 경로).
+    # (x0, y0, x1, y1), 각 0~1. 기본 = 가로 전체, 위에서 60% (상단 60%).
     # None 이면 전체 화면. OT 트랙 도식상 마커는 주행 경로 위에 등장.
-    roi_norm: Optional[Tuple[float, float, float, float]] = (0.2, 0.4, 0.8, 1.0)
+    roi_norm: Optional[Tuple[float, float, float, float]] = (0.0, 0.0, 1.0, 0.6)
 
 
 def create_detector(config: ArucoConfig) -> "aruco.ArucoDetector":

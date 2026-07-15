@@ -120,6 +120,7 @@ class InferenceNode(Node):
         self.declare_parameter('fork_commit_frames', dp['fork_commit_frames'])
         self.declare_parameter('sign_margin', dp['sign_margin'])
         self.declare_parameter('sign_conf', dp['sign_conf'])
+        self.declare_parameter('sign_revise_frames', dp['sign_revise_frames'])
         # 갈림길 커밋 트리거(근접/소실, B.3): 방향은 멀리서 래치하되 표지판이
         # 가까워졌을 때만 꺾기 시작. frame_height 는 image_callback 이 항상 넘기므로
         # 실주행에서 활성. sign_proximity_metric 으로 근접 지표를 카메라 지오메트리에
@@ -148,8 +149,8 @@ class InferenceNode(Node):
         # 근접 게이팅: 마커 면적/프레임 면적이 이 값 이상일 때만 정지(멀면 무시).
         self.declare_parameter('aruco_min_area_ratio', 0.0)
         # ROI 게이팅: 마커 중심이 이 정규화 사각형[x0,y0,x1,y1] 안일 때만 인정.
-        # 빈 배열([])이면 전체 화면. 기본 = 하단 60%·가로 중앙 60%(주행 경로).
-        self.declare_parameter('aruco_roi_norm', [0.2, 0.4, 0.8, 1.0])
+        # 빈 배열([])이면 전체 화면. 기본 = 가로 전체·상단 70%.
+        self.declare_parameter('aruco_roi_norm', [0.0, 0.0, 1.0, 0.7])
         # 정지 진입(민감·작게) / 재출발 확인(보수·크게) — 비대칭 히스테리시스(9.5).
         # 카메라 프레임 rate 단위(image_callback 마다 1프레임).
         self.declare_parameter('aruco_stop_confirm_frames', 2)
@@ -222,6 +223,8 @@ class InferenceNode(Node):
             'fork_commit_frames': int(self.get_parameter('fork_commit_frames').value),
             'sign_margin': float(self.get_parameter('sign_margin').value),
             'sign_conf': float(self.get_parameter('sign_conf').value),
+            'sign_revise_frames': int(
+                self.get_parameter('sign_revise_frames').value),
             'sign_proximity_metric': str(
                 self.get_parameter('sign_proximity_metric').value),
             'sign_commit_ratio': float(

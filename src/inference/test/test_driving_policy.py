@@ -406,6 +406,39 @@ def test_start_straight_disabled_by_default():
     assert p.turn_intent == 'left', '유예 0 이면 즉시 분기(하위호환)'
 
 
+def test_sign_revise_before_commit():
+    # 출발 직후 (오)검출로 right 가 먼저 래치돼도, 커밋(꺾기) 전에 실제 left
+    # 표지판이 sign_revise_frames 연속 확정되면 방향을 left 로 교정한다(B.3 오주행
+    # 방지 — "먼저 잡힌 방향 영구 고정" 결함 해소).
+    H = 480
+    far = dict(x1=150, y1=10, x2=170, y2=30)   # 멀리(작고 위쪽) → 커밋 조건 미달
+    p = DrivingPolicy({'require_green_start': False, 'confirm_frames': 2,
+                       'sign_revise_frames': 2, 'sign_commit_ratio': 0.6,
+                       'sign_proximity_metric': 'bottom_y'})
+    p.on_detections([Det(RIGHT_SIGN, 0.9, **far)], frame_height=H)
+    p.on_detections([Det(RIGHT_SIGN, 0.9, **far)], frame_height=H)
+    assert p.turn_intent == 'right' and not p.commit_triggered, '먼 곳 스퍼리어스 right 래치'
+    p.on_detections([Det(LEFT_SIGN, 0.9, **far)], frame_height=H)
+    p.on_detections([Det(LEFT_SIGN, 0.9, **far)], frame_height=H)
+    assert p.turn_intent == 'left', '커밋 전이면 반대 방향 확정 시 래치 교정'
+    assert not p.commit_triggered
+
+
+def test_sign_no_revise_after_commit():
+    # 일단 커밋(꺾기)이 시작되면 반대 방향 표지판이 보여도 방향을 뒤집지 않는다(안전).
+    H = 480
+    near = dict(x1=140, y1=300, x2=180, y2=460)   # 가까이 → 커밋
+    p = DrivingPolicy({'require_green_start': False, 'confirm_frames': 2,
+                       'sign_revise_frames': 2, 'sign_commit_ratio': 0.6,
+                       'sign_proximity_metric': 'bottom_y', 'fork_commit_frames': 5})
+    p.on_detections([Det(RIGHT_SIGN, 0.9, **near)], frame_height=H)
+    p.on_detections([Det(RIGHT_SIGN, 0.9, **near)], frame_height=H)
+    assert p.turn_intent == 'right' and p.commit_triggered, '가까우면 커밋'
+    p.on_detections([Det(LEFT_SIGN, 0.9, **near)], frame_height=H)
+    p.on_detections([Det(LEFT_SIGN, 0.9, **near)], frame_height=H)
+    assert p.turn_intent == 'right', '커밋 후에는 방향 고정(안 뒤집음)'
+
+
 def _run_all():
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     for fn in fns:
