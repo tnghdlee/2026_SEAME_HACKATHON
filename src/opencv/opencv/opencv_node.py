@@ -27,6 +27,13 @@ class OpenCvNode(Node):
         self.declare_parameter('publish_lane_debug', True)
         self.declare_parameter('lane_debug_topic', '/opencv/image/lane')
         self.declare_parameter('lane_valid_min_px', 40)
+        # 발행 offset 횡 바이어스 보정(캘리브레이션): 차를 직선 중앙에 세웠을 때
+        # offset 이 0 이 아니면(BEV 중심이 카메라 보어와 어긋난 순수 횡 바이어스),
+        # 그 상수값을 여기 넣어 발행 offset 에서 뺀다 → 중앙=0. offset -= bias 후
+        # [-1,1] 로 클립. 부호: 중앙에서 offset 이 +면 +bias 를 넣는다(양수를 뺌).
+        # ⚠️ 이건 BEV 4점 캘리브레이션의 경량 대체(순수 횡 상수 편차 전용) — 카메라가
+        # 요(yaw)로 틀어져 near/far 편차가 크면 BEV 4점 재캘리브레이션이 근본 해결.
+        self.declare_parameter('lane_offset_bias', 0.0)
 
         # --- 트랙 프로파일 (CLAUDE.md 10번) ---
         # 검출 특성이 반대인 두 트랙을 프리셋으로 보존. 기본은 대회 규정 트랙.
@@ -104,6 +111,7 @@ class OpenCvNode(Node):
         self.publish_lane_debug = bool(self.get_parameter('publish_lane_debug').value)
         lane_debug_topic = str(self.get_parameter('lane_debug_topic').value)
         self.lane_valid_min_px = int(self.get_parameter('lane_valid_min_px').value)
+        self.lane_offset_bias = float(self.get_parameter('lane_offset_bias').value)
         self.lane_hsv_lower = [int(v) for v in self.get_parameter('lane_hsv_lower').value]
         self.lane_hsv_upper = [int(v) for v in self.get_parameter('lane_hsv_upper').value]
         self.lane_white_s_max = int(self.get_parameter('lane_white_s_max').value)
@@ -263,9 +271,12 @@ class OpenCvNode(Node):
                     a = self.lane_width_ema
                     self._lane_half_px = ((1.0 - a) * self._lane_half_px
                                           + a * lane.lane_width_px)
+            # 횡 바이어스 보정: 직선 중앙에서 offset≈0 이 되도록 상수를 뺀다(캘리브
+            # 레이션). bias=0.0(기본)이면 무보정. [-1,1] 로 클립.
+            pub_offset = float(np.clip(lane.offset - self.lane_offset_bias, -1.0, 1.0))
             # 발행 계약은 [offset, valid, curvature] 3원소 유지(문서화된 인터페이스).
             lane_msg = Float32MultiArray()
-            lane_msg.data = [lane.offset, 1.0 if lane.valid else 0.0, lane.curvature]
+            lane_msg.data = [pub_offset, 1.0 if lane.valid else 0.0, lane.curvature]
             self.lane_pub.publish(lane_msg)
 
             if want_overlay and lane.overlay is not None:
@@ -279,7 +290,8 @@ class OpenCvNode(Node):
             if self._lane_log_count >= 15:
                 self._lane_log_count = 0
                 self.get_logger().info(
-                    f'lane: valid={lane.valid} offset={lane.offset:+.3f} '
+                    f'lane: valid={lane.valid} offset={pub_offset:+.3f} '
+                    f'(raw={lane.offset:+.3f} bias={self.lane_offset_bias:+.3f}) '
                     f'curvature={lane.curvature:+.3f} pixels={lane.pixels} '
                     f'mask_px={lane.mask_pixels} '
                     f'valid_bands={lane.valid_bands} L={lane.left_detected} '

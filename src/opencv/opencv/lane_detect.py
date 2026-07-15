@@ -174,6 +174,51 @@ def build_perspective(img_w, img_h, src_tl, src_tr, src_br, src_bl, warp_w, warp
     return cv2.getPerspectiveTransform(src, dst)
 
 
+def _remove_horizontal_lines(binary_bev, min_width_frac=0.5, dilate_rows=6):
+    """BEV(조감도) 상의 가로선(정지선·격자선·체커보드 등)을 제거 — 행 밀도 + 밴드 팽창.
+
+    가로선은 노면에 주행 방향과 수직으로 그어진 선이라, 원근을 편 BEV 에서는
+    폭을 가로지르는 '수평 픽셀 띠'로 나타난다. 반면 차선(세로/곡선)은 한 행(row)
+    안에서 선 두께(수 px)만 차지한다. 따라서 '한 행의 켜진 픽셀 수'를 세어,
+    그 수가 BEV 폭의 min_width_frac 이상인 행을 가로선 후보로 본다.
+
+    ⚠️ 체커보드(출발선 겸 정지선) 대응 — 밴드 팽창(dilate_rows):
+      체커보드는 흑/백 사각형이 교차하는 패턴이라 한 행의 흰 픽셀이 ~50%뿐이고
+      행마다 밀도가 들쭉날쭉해, 단순 행 임계만으로는 밴드 중 일부 행이 임계를
+      빠져나가 흰 사각형 잔여물이 히스토그램/슬라이딩 윈도우 출발점을 오염시킨다
+      (→ 차량이 바깥으로 이탈, CLAUDE.md 8.1). 그러나 체커보드는 '얇은 한 줄'이
+      아니라 여러 행에 걸친 '두꺼운 밴드'라는 점이 차선(행당 두께 수 px)과 결정적
+      으로 다르다. 그래서 후보 행 마스크를 세로로 dilate_rows 만큼 팽창(gap-bridging)
+      해, 밴드 내부에서 임계 아래로 살짝 꺼진 행(≤2·dilate_rows 간격)을 메우고
+      밴드 가장자리의 옅은 행까지 함께 지운다 → 체커보드 밴드가 통째로 제거된다.
+
+    형태학적 열림(연속 런 요구)과 달리 픽셀 '개수'만 보므로, 임계처리로 중간중간
+    끊긴 실제 정지선(점선처럼 갈라진 마스크)도 총량으로 잡아 확실히 제거한다.
+    세로 차선은 한 행에서 두께(수 px)만 차지 → 임계 밑이라 절대 지워지지 않고,
+    가로선이 세로 차선과 겹친 행은 통째로 지워지지만 세로 차선엔 얇은 틈만 남아
+    2차 함수 적합이 문제없이 이어진다. (두 차선이 떨어져 있어도 행당 픽셀 합은
+    선 두께 두 개분뿐 → 임계 아래라 안전, 밴드 팽창은 후보 행 주변만 확장.)
+
+    min_width_frac<=0 이면 비활성. dilate_rows<=0 이면 단순 행 임계만 적용.
+    """
+    if min_width_frac is None or min_width_frac <= 0:
+        return binary_bev
+    h, w = binary_bev.shape[:2]
+    row_counts = np.count_nonzero(binary_bev > 0, axis=1)
+    horiz_rows = row_counts >= (min_width_frac * w)
+    if not horiz_rows.any():
+        return binary_bev
+    d = int(dilate_rows) if dilate_rows else 0
+    if d > 0:
+        # 후보 행 마스크를 세로로 팽창(±d): 밴드 내부의 임계 미달 행(간격 ≤2d)을
+        # 메우고 가장자리 옅은 행까지 확장해 체커보드 밴드를 통째로 지운다.
+        kernel = np.ones(2 * d + 1, dtype=np.int32)
+        horiz_rows = np.convolve(horiz_rows.astype(np.int32), kernel, mode='same') > 0
+    out = binary_bev.copy()
+    out[horiz_rows, :] = 0
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # 3) 히스토그램으로 좌/우 출발점 찾기
 # --------------------------------------------------------------------------- #
@@ -255,6 +300,10 @@ def compute_lane_offset(
     min_lane_px=200,
     lane_width_ratio=0.55,
     min_sep_ratio=0.30,
+    # BEV 가로선(정지선·격자·체커보드) 제거 — 행 밀도 임계(폭 비율) + 밴드 팽창(±px).
+    # opencv_node 의 lane_horiz_filter_frac/pad 에 대응. frac<=0 이면 비활성.
+    horiz_filter_frac=0.5,
+    horiz_filter_pad=6,
     prior_half_px=None,
     valid_min_px=40,
     draw=False,
@@ -300,6 +349,10 @@ def compute_lane_offset(
                           warp_w, warp_h)
     binary_bev = cv2.warpPerspective(mask, M, (warp_w, warp_h),
                                      flags=cv2.INTER_NEAREST)
+
+    # BEV 상 가로선(정지선·격자·체커보드) 제거 — 히스토그램/윈도우 출발점 오염 방지.
+    binary_bev = _remove_horizontal_lines(binary_bev, horiz_filter_frac,
+                                          horiz_filter_pad)
 
     total_px = int((binary_bev > 0).sum())
     overlay = cv2.cvtColor(binary_bev, cv2.COLOR_GRAY2BGR) if draw else None

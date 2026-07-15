@@ -36,6 +36,11 @@ def generate_launch_description():
     # brightness/light. 연습 트랙(회색 바닥+주황 라인)에서
     # 실주행 테스트할 때만 lane_profile:=orange_track 으로 전환.
     lane_profile = LaunchConfiguration('lane_profile')
+    # 차선 offset 횡 바이어스 보정. 차를 직선 중앙에 세웠을 때 /lane/offset 이 0 이
+    # 아니면(BEV 중심이 카메라 보어와 어긋난 순수 횡 바이어스) 그 상수를 여기 줘서
+    # 발행 offset 에서 뺀다 → 중앙=0. 2026-07 실측 캘리브레이션값 0.045.
+    # 카메라 재장착·트랙 변경 시 직선 중앙에서 raw offset 을 재측정해 갱신.
+    lane_offset_bias = LaunchConfiguration('lane_offset_bias')
     # 출발 직진 유예(제어 프레임): 초록불 출발 확정 후 이 프레임 수 동안 표지판
     # 분기를 억제하고 직진(차선 추종)한다. 실코스가 출발→S자→갈림길 순이라
     # 출발 직후 (오)검출로 즉시 꺾이는 것을 막는다. 20Hz 기준 100≈5s.
@@ -65,8 +70,15 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'cruise_throttle',
-            default_value='0.19',
+            default_value='0.17',
             description='직진 순항 throttle. 조향만 점검하려면 0.0 으로 주면 바퀴가 안 돈다.',
+        ),
+        DeclareLaunchArgument(
+            'lane_offset_bias',
+            default_value='0.045',
+            description=('차선 offset 횡 바이어스 보정(직선 중앙에서 offset→0). '
+                        '2026-07 실측 0.045. 직선 중앙에 세우고 /lane/offset 의 raw '
+                        '값을 재측정해 갱신(ros2 topic echo 또는 opencv 진단 로그).'),
         ),
         DeclareLaunchArgument(
             'lane_profile',
@@ -175,6 +187,9 @@ def generate_launch_description():
                     'lane_block_size': 51,     # 25 × 2.0 — 적응형 임계값 창(홀수, 원본)
                     # 가로선(정지선·격자) 제거 — BEV 행 밀도 임계(폭 비율). 끊긴 정지선도 잡음.
                     'lane_horiz_filter_frac': 0.4,
+                    # 횡 바이어스 보정(직선 중앙에서 offset→0). 런타임 인자로 노출.
+                    'lane_offset_bias': ParameterValue(
+                        lane_offset_bias, value_type=float),
                     'debug_log': False,
                 },
             ],
@@ -237,24 +252,24 @@ def generate_launch_description():
                     'require_green_start': ParameterValue(
                         require_green_start, value_type=bool),
                     # --- 출발 킥스타트: 초록불 확정 직후 조향 없이 직진 출발 ---
-                    'start_kick_throttle': 0.19,   # 킥스타트 throttle(정지마찰 극복)
+                    'start_kick_throttle': 0.17,   # 킥스타트 throttle(정지마찰 극복)
                     # 킥스타트 지속(초). control_hz 로 환산. 0=킥 비활성.
                     'start_kick_seconds': ParameterValue(
                         start_kick_seconds, value_type=float),
                     # --- throttle (트랙 현장 조정 대상) ---
                     'cruise_throttle': ParameterValue(
                         cruise_throttle, value_type=float),  # 직진 순항 (기본 0.17)
-                    'corner_throttle': 0.18,  # 코너 감속 throttle
+                    'corner_throttle': 0.17,  # 코너 감속 throttle
                     # 코너 판정 곡률 임계(정규화 [-1,1] 스케일). 실측 직선 curvature
                     # 노이즈가 ~0.04 이므로 0.30 은 사실상 발동 안 됨 → 0.12 로 낮춰
                     # 실제 커브에서 감속되게 함. ctrl 로그의 curv/corner_hold 로 튜닝.
                     'corner_curvature_threshold': 0.12,
                     # 커브 진입 전 예측 감속 홀드 계수(0~1). 클수록 더 일찍/오래 감속 유지.
                     'curve_hold_decay': 0.85,
-                    'turn_throttle': 0.19,     # 갈림길 커밋 중 감속
+                    'turn_throttle': 0.17,     # 갈림길 커밋 중 감속
                     # 조향 중(바퀴 꺾는 중) throttle: |steer-trim| 이 임계 이상이면
                     # 실제 조향각에 반응해 감속(곡률 기반 corner_throttle 과 별개).
-                    'steer_throttle': 0.19,
+                    'steer_throttle': 0.17,
                     'steer_throttle_threshold': 0.05,
                     # --- 조향 (트랙 현장 조정 대상) ---
                     'steer_sign': -1.0,        # 전체 조향 극성(벤치서 반대면 뒤집기)
@@ -302,7 +317,7 @@ def generate_launch_description():
                     'start_straight_frames': ParameterValue(
                         start_straight_frames, value_type=int),
                     # --- 속도 (트랙 현장 조정 대상) ---
-                    'lane_lost_throttle': 0.19,
+                    'lane_lost_throttle': 0.17,
                     # --- ArUco 동적 장애물 정지/재출발 (B.4) ---
                     # 장애물 마커 등장 시 정지, 소멸 시 재출발(정지 중 스탑워치 멈춤).
                     'aruco_enabled': True,

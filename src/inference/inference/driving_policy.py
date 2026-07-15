@@ -479,7 +479,6 @@ class DrivingPolicy:
             if self._left_streak >= p['confirm_frames']:
                 latched = 'left'
             elif self._right_streak >= p['confirm_frames']:
-<<<<<<< HEAD
                 latched = 'right'
             if latched is not None:
                 self.turn_intent = latched
@@ -487,8 +486,6 @@ class DrivingPolicy:
                 self._sign_max_prox = 0.0
                 self._sign_absent_streak = 0
                 self._sign_seen_since_latch = 0
-=======
-                self.turn_intent = 'right'
         elif not self.commit_triggered:
             # 아직 커밋(꺾기) 전이면 반대 방향이 sign_revise_frames 연속 확정될 때
             # 래치를 갱신한다. 출발 직후 잘못 래치된 방향을 실제 갈림길 표지판이
@@ -502,7 +499,6 @@ class DrivingPolicy:
                     and self._right_streak >= p['sign_revise_frames']):
                 self.turn_intent = 'right'
                 self._reset_sign_tracking()
->>>>>>> 4921f84 (added src)
 
         # 방향 래치와 실제 커밋(꺾기)의 분리: 방향은 위에서 멀리서도 일찍 래치하되,
         # fork_remaining(=꺾기 시작)은 표지판이 가까워졌을 때만 세팅한다. 멀리서
