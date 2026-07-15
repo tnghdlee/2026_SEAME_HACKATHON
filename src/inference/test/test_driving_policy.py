@@ -166,6 +166,36 @@ def test_fork_commit_bias():
     assert t == p.p['turn_throttle']
 
 
+def test_fork_release_and_cooldown_after_commit():
+    # 커밋(꺾기) 완료 후 turn_intent 가 해제되고, 쿨다운 동안 재래치가 차단되는지.
+    # 회귀 방지: 과거엔 래치가 영구히 남아 오검출(phantom) 표지판 한 번에 남은
+    # 주행 내내 좌/우로 갇혀 이탈했다(bag_20260715_183336 t+67 실측).
+    p = DrivingPolicy({'require_green_start': False, 'confirm_frames': 2,
+                       'turn_bias': 0.3, 'steer_sign': 1.0, 'drive_direction': 1.0,
+                       'fork_commit_frames': 3, 'fork_cooldown_frames': 5,
+                       'steer_slew': 1.0})
+    p.on_detections([Det(LEFT_SIGN, 0.9)])
+    p.on_detections([Det(LEFT_SIGN, 0.9)])
+    assert p.turn_intent == 'left' and p.commit_triggered
+    # 커밋 소진(3프레임) → 해제 + 쿨다운 arm.
+    for _ in range(3):
+        p.step(straight())
+    assert p.turn_intent is None, '커밋 완료 후 방향 래치 해제'
+    assert not p.commit_triggered
+    assert p.fork_cooldown_remaining == 5, '재래치 쿨다운 arm'
+    # 쿨다운 중엔 좌표지판을 다시 봐도 재래치 안 함(방금 지나친 표지판 재커밋 방지).
+    p.on_detections([Det(LEFT_SIGN, 0.9)])
+    p.on_detections([Det(LEFT_SIGN, 0.9)])
+    assert p.turn_intent is None, '쿨다운 중 재래치 차단'
+    # 쿨다운 소진(비커밋 step 5회).
+    for _ in range(5):
+        p.step(straight())
+    assert p.fork_cooldown_remaining == 0
+    # 이제 실제 새 표지판이면 정상 재래치.
+    p.on_detections([Det(LEFT_SIGN, 0.9)])
+    assert p.turn_intent == 'left', '쿨다운 후 정상 재래치'
+
+
 def test_sign_proximity_commit_bottom_y():
     # 근접 게이팅(기본 지표 bottom_y): 방향은 멀리서 래치하되, 표지판 하단이
     # 프레임 아래로 sign_commit_ratio 만큼 내려오기 전까지는 커밋을 미룬다.
@@ -365,6 +395,35 @@ def test_curve_feedforward():
     p_ff2 = DrivingPolicy(dict(base, curve_ff=0.5))
     s_ff2, _ = p_ff2.step(straight(valid=True, offset=0.0, curv=-0.4))
     assert s_ff2 < 0.0, 'curve_ff>0 + 좌커브 → 좌조향'
+
+
+def test_steer_response_curve():
+    # 조향 응답 곡선: 작은 조향은 증폭(언더스티어 완화), 큰 조향은 감쇠(오버스티어
+    # 완화). 선형(게인 1.0/1.0) 대비 같은 offset 에서 조향 크기를 비교한다.
+    # steer_kd=0·curve_ff=0·slew 무제한 → 조향 = steer_sign·response(kp·(offset-dead)).
+    base = {'require_green_start': False, 'steer_sign': 1.0, 'steer_kp': 0.6,
+            'steer_kd': 0.0, 'curve_ff': 0.0, 'steer_slew': 1.0,
+            'steer_deadband': 0.0, 'steer_throttle_threshold': 10.0}
+    lin = dict(base, steer_gain_center=1.0, steer_gain_edge=1.0)
+    curve = dict(base, steer_gain_center=1.4, steer_gain_edge=0.7,
+                 steer_gain_ref=0.45)
+    # 작은 offset(작은 pd) → 곡선이 선형보다 크게 꺾는다(증폭).
+    s_lin_small, _ = DrivingPolicy(lin).step(straight(valid=True, offset=0.1))
+    s_cur_small, _ = DrivingPolicy(curve).step(straight(valid=True, offset=0.1))
+    assert s_cur_small > s_lin_small > 0.0, '작은 조향은 증폭(언더스티어 완화)'
+    # 큰 offset(큰 pd) → 곡선이 선형보다 작게 꺾는다(감쇠).
+    s_lin_big, _ = DrivingPolicy(lin).step(straight(valid=True, offset=0.9))
+    s_cur_big, _ = DrivingPolicy(curve).step(straight(valid=True, offset=0.9))
+    assert 0.0 < s_cur_big < s_lin_big, '큰 조향은 감쇠(오버스티어 완화)'
+    # 부호 보존(좌측 offset<0 → 좌조향, 곡선에서도 부호 유지).
+    s_neg, _ = DrivingPolicy(curve).step(straight(valid=True, offset=-0.1))
+    assert s_neg < 0.0, '응답 곡선이 부호를 보존'
+    # 게인 1.0/1.0 이면 무동작(선형과 동일).
+    s_lin2, _ = DrivingPolicy(lin).step(straight(valid=True, offset=0.5))
+    s_noop, _ = DrivingPolicy(dict(base, steer_gain_center=1.0,
+                                   steer_gain_edge=1.0)).step(
+        straight(valid=True, offset=0.5))
+    assert abs(s_lin2 - s_noop) < 1e-9, '게인 1.0/1.0 → 선형(하위호환)'
 
 
 def test_start_straight_grace():

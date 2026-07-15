@@ -100,10 +100,32 @@ class OpenCvNode(Node):
         # 라인에 두 윈도우가 겹쳐 잠긴 것으로 보고 픽셀 많은 쪽만 단일 라인으로
         # 강등한다(허위 양쪽 검출 배제 → 중앙이 한 선으로 끌려가는 것 방지).
         self.declare_parameter('lane_min_sep_ratio', 0.30)
+        # 한쪽 라인 인정 최소 세로 폭(수집 픽셀 y범위 / BEV 높이). 가로선은 조감도에서
+        # 세로로 짧으므로 이 값 미만이면 차선으로 인정하지 않는다(가로선→90도 이탈 방지).
+        self.declare_parameter('lane_min_y_span_ratio', 0.40)
+        # 이상치 방어: 저신뢰(한쪽만 검출, valid_bands<2) 프레임에서 발행 offset 이
+        # 직전보다 이 값 넘게 급변하면 급변량을 이 값으로 제한한다(가로선 오검출로
+        # offset 이 순간 극단으로 튀어 90도 조향하는 것 방지). 0 이면 비활성.
+        # 양쪽 검출(valid_bands==2, 고신뢰)은 제한 없이 그대로 발행(실제 급커브 허용).
+        self.declare_parameter('lane_offset_max_jump', 0.35)
         # 한쪽 소실 폴백 차폭 메모리 EMA 계수(0~1). 양쪽 검출 프레임의 실측 반차폭을
         # 이 계수로 지수평활해 기억하고, 한쪽 소실 시 폴백에 되먹인다. 0 이면 메모리
         # 비활성(항상 lane_width_ratio 고정 추정).
         self.declare_parameter('lane_width_ema', 0.3)
+        # 저신뢰(한쪽만 검출, valid_bands<2) 프레임 발행 offset 의 절대 상한.
+        # 한쪽 폴백은 center=검출라인±반차폭 이라, 기억 반차폭(mem_half)이 오염돼
+        # 작아지면 중앙 추정이 크게 어긋나 offset 이 ±0.8 로 튀고(실측 bag_20260715_
+        # 183336: bands=1 max|off|=0.85 vs bands=2 max|off|=0.50) 차가 헛도는 차선
+        # 위치를 쫓아 이탈한다. 한쪽 검출은 본질적으로 저신뢰이므로 이 값으로 캡해
+        # phantom 대각 이탈을 막는다. 양쪽 검출(고신뢰)은 캡 없이 실제 급커브 허용.
+        # 0=비활성. 실차서 한쪽 구간 복원이 느리면 키우고, 여전히 튀면 줄인다.
+        self.declare_parameter('lane_lowconf_offset_cap', 0.55)
+        # 차폭 메모리 오염 방지: 양쪽 검출 반차폭이 이 하한(BEV 폭 비율) 미만이면
+        # 두 슬라이딩 윈도우가 같은/인접 라인에 겹쳐 잡힌 '좁은 거짓쌍'으로 보고 EMA
+        # 갱신에서 제외한다(mem_half 가 37.8 같은 비현실값으로 붕괴하는 것 방지 —
+        # 실측 정상 반차폭≈67px=0.34·BEV폭, 거짓쌍은 32~49px). 하한 미만이라도 발행
+        # offset 은 그대로(캡은 B1 이 담당) — 여기선 메모리만 보호한다. 0=비활성.
+        self.declare_parameter('lane_width_min_valid_ratio', 0.28)
 
         subscribe_topic = str(self.get_parameter('subscribe_topic').value)
         self.jpeg_quality = int(self.get_parameter('jpeg_quality').value)
@@ -140,7 +162,15 @@ class OpenCvNode(Node):
         self.lane_horiz_filter_frac = float(self.get_parameter('lane_horiz_filter_frac').value)
         self.lane_horiz_filter_pad = int(self.get_parameter('lane_horiz_filter_pad').value)
         self.lane_min_sep_ratio = float(self.get_parameter('lane_min_sep_ratio').value)
+        self.lane_min_y_span_ratio = float(
+            self.get_parameter('lane_min_y_span_ratio').value)
+        self.lane_offset_max_jump = float(
+            self.get_parameter('lane_offset_max_jump').value)
         self.lane_width_ema = float(self.get_parameter('lane_width_ema').value)
+        self.lane_lowconf_offset_cap = float(
+            self.get_parameter('lane_lowconf_offset_cap').value)
+        self.lane_width_min_valid_ratio = float(
+            self.get_parameter('lane_width_min_valid_ratio').value)
 
         # --- 프로파일 프리셋 해석 (개별 param 명시 시 덮어씀) ---
         profiles = {
@@ -186,6 +216,8 @@ class OpenCvNode(Node):
         # 한쪽 소실 폴백에 쓸 반차폭 메모리(BEV px). 양쪽 검출 프레임의 실측
         # 차폭으로 EMA 갱신. 0 이면 아직 미측정(폴백은 lane_width_ratio 고정 추정).
         self._lane_half_px = 0.0
+        # 이상치 방어용 직전 발행 offset(저신뢰 프레임 급변 제한).
+        self._last_pub_offset = 0.0
 
         self.get_logger().info(
             f'OpenCV node started (BEV+sliding-window): subscribe_topic={subscribe_topic}, '
@@ -255,6 +287,7 @@ class OpenCvNode(Node):
                 min_lane_px=self.min_lane_px,
                 lane_width_ratio=self.lane_width_ratio,
                 min_sep_ratio=self.lane_min_sep_ratio,
+                min_y_span_ratio=self.lane_min_y_span_ratio,
                 horiz_filter_frac=self.lane_horiz_filter_frac,
                 horiz_filter_pad=self.lane_horiz_filter_pad,
                 # 직전 양쪽 검출에서 실측·기억한 반차폭을 한쪽 소실 폴백에 되먹인다.
@@ -266,10 +299,15 @@ class OpenCvNode(Node):
             )
             # 양쪽 검출(valid_bands==2) 프레임의 실측 반차폭으로 폴백 메모리 EMA 갱신.
             # 한쪽만 보인 프레임은 폴백값이라 메모리를 오염시키지 않도록 제외한다.
+            # 차폭 메모리 오염 방지(B2): 좁은 거짓쌍(두 윈도우가 같은/인접 라인에
+            # 겹쳐 잡힘)을 EMA 에서 제외한다. 실측 정상 반차폭≈67px 인데 거짓쌍은
+            # 32~49px 로, 이게 EMA 를 37.8px 로 끌어내려 한쪽 폴백 중앙이 붕괴했다.
+            width_floor = self.lane_width_min_valid_ratio * self.bev_warp_w
             if (lane.valid and lane.valid_bands == 2 and lane.lane_width_px > 0.0
+                    and lane.lane_width_px >= width_floor
                     and self.lane_width_ema > 0.0):
                 if self._lane_half_px <= 0.0:
-                    self._lane_half_px = lane.lane_width_px        # 첫 측정은 즉시 채택
+                    self._lane_half_px = lane.lane_width_px        # 첫(타당) 측정 즉시 채택
                 else:
                     a = self.lane_width_ema
                     self._lane_half_px = ((1.0 - a) * self._lane_half_px
@@ -277,6 +315,27 @@ class OpenCvNode(Node):
             # 횡 바이어스 보정: 직선 중앙에서 offset≈0 이 되도록 상수를 뺀다(캘리브
             # 레이션). bias=0.0(기본)이면 무보정. [-1,1] 로 클립.
             pub_offset = float(np.clip(lane.offset - self.lane_offset_bias, -1.0, 1.0))
+            # 이상치 방어(가로선 오검출 → 90도 이탈 방지): 저신뢰(한쪽만 검출,
+            # valid_bands<2) 프레임에서 발행 offset 이 직전보다 max_jump 넘게 급변하면
+            # 급변량을 max_jump 로 제한한다. 가로선이 차선으로 잠기면 offset 이 순간
+            # 극단으로 튀는데, 저신뢰 프레임의 이런 스파이크를 눌러 준다. 양쪽 검출
+            # (valid_bands==2, 고신뢰)은 제한 없이 그대로 발행해 실제 급커브를 허용한다.
+            if (lane.valid and self.lane_offset_max_jump > 0.0
+                    and lane.valid_bands < 2):
+                delta = pub_offset - self._last_pub_offset
+                if delta > self.lane_offset_max_jump:
+                    pub_offset = self._last_pub_offset + self.lane_offset_max_jump
+                elif delta < -self.lane_offset_max_jump:
+                    pub_offset = self._last_pub_offset - self.lane_offset_max_jump
+            # 저신뢰 절대 offset 캡(B1): 한쪽만 검출(valid_bands<2)한 프레임은 폴백
+            # 반차폭에 의존하므로 offset 이 phantom 으로 ±0.8 까지 튈 수 있다. 절대값을
+            # 캡해 대각 이탈을 막는다. 양쪽 검출(고신뢰)은 캡하지 않아 실제 급커브 허용.
+            if (lane.valid and lane.valid_bands < 2
+                    and self.lane_lowconf_offset_cap > 0.0):
+                cap = self.lane_lowconf_offset_cap
+                pub_offset = float(np.clip(pub_offset, -cap, cap))
+            if lane.valid:
+                self._last_pub_offset = pub_offset
             # 발행 계약은 [offset, valid, curvature] 3원소 유지(문서화된 인터페이스).
             lane_msg = Float32MultiArray()
             lane_msg.data = [pub_offset, 1.0 if lane.valid else 0.0, lane.curvature]

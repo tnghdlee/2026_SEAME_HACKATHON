@@ -50,14 +50,6 @@ def default_params():
         'stop_confirm_frames': 2,    # 빨간불 정지(B.6)
         # 출발 게이트
         'require_green_start': True,
-        # 빨강 소멸 출발(대안 트리거): 대기 중 켜진 빨간불이 '확정 정지(red_stopped)'
-        # 될 만큼 확실히 잡힌 뒤, 빨강이 red_gone_frames(YOLO 프레임) 연속 사라지면
-        # = 초록 점등으로 보고 출발한다. 초록 검출이 약해도(빨강은 강함) 출발을
-        # 놓치지 않기 위한 것으로, 기존 초록 확정 출발과 병행(둘 중 뭐라도 출발).
-        # 전제: 대기 중 신호등이 빨강을 표시(사용자 확인). red_gone_frames 는 빨강
-        # 검출이 간헐적으로 깜빡여도 오출발하지 않도록 실차 튜닝(크면 반응 느림).
-        'start_on_red_gone': True,
-        'red_gone_frames': 5,
         # 신호등(빨강/초록) 공통 ROI 게이팅: 신호등은 트랙 위쪽에 설치되므로 검출
         # 박스의 세로 중심이 프레임 높이의 이 비율보다 아래면(=하단) 오검출로 보고
         # 무시한다. 빨강·초록 둘 다에 적용(상단 50% 로 제한). frame_height 가
@@ -118,7 +110,7 @@ def default_params():
         # 기계적으로 재중심화해 STEER_TRIM 을 0 근처로 낮춰야 양쪽 ±500µs 회복.
         'symmetric_steer': True,
         'steer_sign': -1.0,
-        'steer_kp': 0.4,
+        'steer_kp': 0.6,
         'steer_kd': 0.5,
         # 조향 데드밴드: |offset|<이 값이면 비례항 0(직선 지그재그/hunting 방지).
         'steer_deadband': 0.04,
@@ -127,13 +119,36 @@ def default_params():
         # 같은 프레임(차선 기하)에서 나온 값이라 steer_sign 만 적용하고
         # drive_direction 미러링은 하지 않는다(turn_bias 와 다름). 직선 곡률
         # 노이즈(~0.04)엔 사실상 무영향, 실제 커브에서만 유효. 실차 튜닝 대상.
-        'curve_ff': 0.35,
-        'steer_slew': 0.15,
+        'curve_ff': 0.45,
+        'steer_slew': 0.25,
+        # 조향 응답 곡선(비선형 게인) — 언더/오버스티어 보정.
+        # 실차 관찰: 조향이 작을 때는 언더스티어(덜 꺾임), 클 때는 오버스티어(과조향).
+        # 선형 게인(steer_kp) 하나로는 둘을 동시에 못 잡는다. 그래서 차선 PD 피드백
+        # (steer_kp·offset + steer_kd·Δoffset)의 크기 |pd| 에 의존하는 게인을 곱한다:
+        #   - 작은 조향(|pd|→0)  → steer_gain_center(>1)로 증폭 → 언더스티어 완화,
+        #   - 큰 조향(|pd|≥ref) → steer_gain_edge(<1)로 감쇠   → 오버스티어 완화.
+        # |pd|/steer_gain_ref 로 center→edge 를 선형 보간(_steer_response).
+        # 게인이 1.0 로 교차(=선형과 동일)하는 지점: |pd| = ref·(center-1)/(center-edge).
+        # 기본값(center 1.4 / edge 0.7 / ref 0.45): |pd|<0.26 증폭, >0.26 감쇠
+        # (steer_kp=0.6, deadband=0.04 기준 대략 offset<0.47 증폭 / >0.47 감쇠 —
+        #  실측 offset std 0.30·|offset|>0.5 11% 구간이 감쇠 대상).
+        # 두 게인 모두 1.0 이면 무동작(선형, 하위호환). 실차 튜닝 대상 — 여전히
+        # 작게 꺾이면 center↑, 여전히 과조향이면 edge↓. 곡률 피드포워드(curve_ff)와
+        # 갈림길 분기 바이어스(turn_bias)에는 적용하지 않고 차선 PD 피드백에만 적용.
+        'steer_gain_center': 1.4,
+        'steer_gain_edge': 0.7,
+        'steer_gain_ref': 0.45,
         # 갈림길
         'turn_bias': 0.5,            # 분기 방향 조향 바이어스(강하게 꺾어야 분기됨)
         'commit_lane_weight': 0.3,   # 커밋 중 차선 PD 기여 비중(0=차선 무시, 1=평소)
         'commit_steer_slew': 0.30,   # 커밋 중 조향 변화 상한(평소 steer_slew보다 큼)
         'fork_commit_frames': 30,    # 제어 프레임(30@20Hz≈1.5s)
+        # 커밋(꺾기) 완료 후 방향 래치를 해제하고 재래치를 이 프레임 동안 차단한다.
+        # 래치가 영구히 남으면(과거 버그) 오검출(phantom) 표지판 한 번에 남은 주행
+        # 내내 좌/우로 갇혀 이탈한다. 커밋 소진 즉시 차선 추종으로 복귀하되, 방금
+        # 지나친 표지판을 다시 잡아 즉시 재커밋하지 않도록 쿨다운을 둔다. 실코스는
+        # 갈림길이 1회이므로 넉넉히(40@20Hz≈2s). 0=쿨다운 없이 즉시 재래치 허용.
+        'fork_cooldown_frames': 40,
         'sign_margin': 0.15,
         'sign_conf': 0.35,
         # --- 방향 표지판 위치·크기(ROI) 게이팅 (B.3, 신설) ---
@@ -239,6 +254,29 @@ def _deadband(x, dead):
     return 0.0
 
 
+def _steer_response(x, gain_center, gain_edge, ref):
+    """조향 응답 곡선: 작은 조향은 키우고(언더스티어 보정) 큰 조향은 눌러(오버스티어 보정).
+
+    x           : 크기에 따라 게인을 조절할 값(차선 PD 피드백). 부호는 보존한다.
+    gain_center : |x|→0 에서의 게인. >1 이면 작은 조향 증폭(언더스티어 완화).
+    gain_edge   : |x|≥ref 에서의 게인. <1 이면 큰 조향 감쇠(오버스티어 완화).
+    ref         : 게인이 gain_edge 로 포화되는 |x| 기준. |x|/ref 로 center→edge 선형 보간.
+
+    두 게인이 모두 1.0 이면 무동작(선형, 하위호환). ref<=0 이면 즉시 edge 게인.
+    """
+    if gain_center == 1.0 and gain_edge == 1.0:
+        return x
+    ax = x if x >= 0.0 else -x
+    if ref <= 0.0:
+        t = 1.0
+    else:
+        t = ax / ref
+        if t > 1.0:
+            t = 1.0
+    gain = gain_center + (gain_edge - gain_center) * t
+    return x * gain
+
+
 def resolve_sign(left_score, right_score, margin, conf):
     """한 프레임의 좌/우 표지판 점수로 방향을 결정(margin 게이팅).
 
@@ -277,6 +315,9 @@ class DrivingPolicy:
         self._sign_max_prox = 0.0      # 래치 후 표지판 최대 근접지표(소실 폴백용)
         self._sign_absent_streak = 0   # 래치 후 표지판 연속 미검출(YOLO 프레임)
         self._sign_seen_since_latch = 0  # 래치 후 표지판을 본 누적 YOLO 프레임(백스톱)
+        # 커밋 완료 후 재래치 차단 잔여(제어 프레임). step 에서 감소, on_detections
+        # 에서 >0 이면 새 turn_intent 래치를 막는다(방금 지나친 표지판 재커밋 방지).
+        self.fork_cooldown_remaining = 0
         # 출발 직진 유예 잔여(제어 프레임). 출발 확정 전이에서 arm, step 에서 감소.
         self.start_straight_remaining = 0
         # 출발 킥스타트 잔여(제어 프레임). 초록불 확정 전이에서 arm, step 에서 감소.
@@ -285,7 +326,6 @@ class DrivingPolicy:
         # --- 연속 프레임 스트릭 ---
         self._green_streak = 0
         self._red_streak = 0
-        self._red_gone_streak = 0     # red_stopped 무장 후 빨강 연속 미검출(빨강 소멸 출발)
         self._left_streak = 0
         self._right_streak = 0
 
@@ -454,35 +494,6 @@ class DrivingPolicy:
         self.commit_triggered = True
         self.fork_remaining = self.p['fork_commit_frames']
 
-    def _begin_start(self, resume_from_red=True):
-        """출발 개시(초록 확정 또는 빨강 소멸 트리거 공통).
-
-        최초 전이(green_started False→True) 시 조향/분기 래치를 리셋해, 출발
-        직후 스테일 커밋으로 꺾이지 않고 직진/차선중앙에서 시작하게 한다. 출발
-        직진 유예·킥스타트도 이때 arm 한다. resume_from_red=True 면 빨간불 정지
-        (red_stopped)를 해제한다 — 출발선 빨강이 남아 throttle 을 0 으로 누르지
-        않게 한다(빨강 소멸 출발은 항상 해제, 초록 출발은 green_resumes_from_red).
-        """
-        p = self.p
-        if not self.green_started:
-            self.turn_intent = None
-            self.fork_remaining = 0
-            self.commit_triggered = False
-            self._sign_max_prox = 0.0
-            self._sign_absent_streak = 0
-            self._sign_seen_since_latch = 0
-            self._left_streak = 0
-            self._right_streak = 0
-            self.last_steer = p['steer_trim']
-            self.last_offset = 0.0
-            self.corner_hold = 0.0
-            self.start_straight_remaining = p['start_straight_frames']
-            self.start_kick_remaining = p['start_kick_frames']
-        self.green_started = True
-        if resume_from_red:
-            self.red_stopped = False
-            self._red_streak = 0
-
     # ---- YOLO 프레임 rate 로 호출 ----
     def on_detections(self, detections, frame_height=None, frame_width=None):
         """detections: class_id/score/x1..y2 속성을 가진 객체 리스트(YoloOnnx.Detection 등).
@@ -519,26 +530,36 @@ class DrivingPolicy:
         # 초록/빨강 스트릭 → 래치.
         self._green_streak = self._green_streak + 1 if GREENLIGHT in best else 0
         self._red_streak = self._red_streak + 1 if REDLIGHT in best else 0
-        # 초록 확정 출발: 출발 순간(최초 전이)에 조향/분기 래치를 리셋하고
-        # green_started 래치. 초록 재확정 시 빨간불 정지 해제는 green_resumes_from_red
-        # 를 따른다(도착 영구정지 유지 옵션). 상세는 _begin_start.
         if self._green_streak >= p['start_confirm_frames']:
-            self._begin_start(resume_from_red=p['green_resumes_from_red'])
+            # 출발 순간(최초 확정 전이): 조향을 중앙으로 정렬한다. 출발 전에
+            # 잘못 래치된 분기 의도(turn_intent)와 조향 상태를 리셋해, 초록불로
+            # 출발하자마자 스테일 커밋으로 꺾이지 않고 직진/차선중앙에서 시작한다.
+            # 출발 이후 실제로 표지판을 보면 다시 정상적으로 래치된다.
+            if not self.green_started:
+                self.turn_intent = None
+                self.fork_remaining = 0
+                self.commit_triggered = False
+                self.fork_cooldown_remaining = 0
+                self._sign_max_prox = 0.0
+                self._sign_absent_streak = 0
+                self._sign_seen_since_latch = 0
+                self._left_streak = 0
+                self._right_streak = 0
+                self.last_steer = p['steer_trim']
+                self.last_offset = 0.0
+                self.corner_hold = 0.0
+                # 출발 직후 직진 유예 arm — 이 구간 동안 분기 래치 억제.
+                self.start_straight_remaining = p['start_straight_frames']
+                # 출발 킥스타트 arm — 조향 없이 고정 throttle 로 직진 출발.
+                self.start_kick_remaining = p['start_kick_frames']
+            self.green_started = True
+            # 초록불 재확정 시 빨간불 정지 해제(정지/재출발). 도착 영구정지를
+            # 원하면 green_resumes_from_red=False 로 끈다.
+            if p['green_resumes_from_red']:
+                self.red_stopped = False
+                self._red_streak = 0
         if self._red_streak >= p['stop_confirm_frames']:
             self.red_stopped = True
-
-        # 빨강 소멸 출발(대안 트리거, pre-start): 대기 중 빨강이 확정 정지(red_stopped)
-        # 될 만큼 확실히 잡힌 뒤, 빨강이 red_gone_frames 연속 사라지면 = 초록 점등으로
-        # 보고 출발한다(빨강은 강하게 검출되므로 약한 초록보다 신뢰↑). 빨강 재검출 시
-        # 카운터 리셋(간헐 깜빡 무시). green_started 후에는 동작 안 함(출발선 전용).
-        if (p['start_on_red_gone'] and not self.green_started
-                and self.red_stopped):
-            if REDLIGHT in best:
-                self._red_gone_streak = 0
-            else:
-                self._red_gone_streak += 1
-                if self._red_gone_streak >= p['red_gone_frames']:
-                    self._begin_start(resume_from_red=True)
 
         # 좌/우 margin 게이팅 후 스트릭 → turn_intent 래치(첫 확정 우선).
         side = resolve_sign(best.get(LEFT_SIGN, 0.0), best.get(RIGHT_SIGN, 0.0),
@@ -558,7 +579,7 @@ class DrivingPolicy:
             self._left_streak = 0
             self._right_streak = 0
 
-        if self.turn_intent is None:
+        if self.turn_intent is None and self.fork_cooldown_remaining <= 0:
             latched = None
             if self._left_streak >= p['confirm_frames']:
                 latched = 'left'
@@ -608,13 +629,15 @@ class DrivingPolicy:
             p_offset = _deadband(lane.offset, p['steer_deadband'])
             d_off = p_offset - self.last_offset
             self.last_offset = p_offset
-            # PD(현재 오차) + 곡률 피드포워드(다가오는 커브 예측). curvature 는
-            # offset 과 같은 부호 규약(먼 밴드가 오른쪽으로 휘면 +)이라 steer_sign
-            # 만 곱한다 — drive_direction 미러링 대상 아님(offset PD 와 동일).
-            lane_effort = p['steer_sign'] * (
-                p['steer_kp'] * p_offset
-                + p['steer_kd'] * d_off
-                + p['curve_ff'] * lane.curvature)
+            # 차선 PD(현재 오차) 피드백. 여기에 비선형 응답 곡선을 먹여
+            # 작은 조향은 증폭(언더스티어 완화)·큰 조향은 감쇠(오버스티어 완화)한다.
+            pd = p['steer_kp'] * p_offset + p['steer_kd'] * d_off
+            pd = _steer_response(pd, p['steer_gain_center'],
+                                 p['steer_gain_edge'], p['steer_gain_ref'])
+            # PD(응답곡선 적용) + 곡률 피드포워드(다가오는 커브 예측, 선형 유지).
+            # curvature 는 offset 과 같은 부호 규약(먼 밴드가 오른쪽으로 휘면 +)이라
+            # steer_sign 만 곱한다 — drive_direction 미러링 대상 아님(offset PD 와 동일).
+            lane_effort = p['steer_sign'] * (pd + p['curve_ff'] * lane.curvature)
         else:
             lane_effort = self.last_steer - trim  # 로스트 시 마지막 조향 유지
 
@@ -643,8 +666,23 @@ class DrivingPolicy:
             bias = p['steer_sign'] * p['drive_direction'] * bias_dir * p['turn_bias']
             target = trim + p['commit_lane_weight'] * lane_effort + bias
             self.fork_remaining -= 1
+            if self.fork_remaining <= 0:
+                # 커밋(꺾기) 완료 → 방향 래치·커밋 트리거·표지판 추적을 초기화해
+                # 차선 추종으로 복귀한다(과거엔 turn_intent 가 영구히 남아, 오검출
+                # 한 번에 남은 주행 내내 갇혔다). 재래치 쿨다운을 arm 해 방금 지나친
+                # 표지판을 즉시 다시 커밋하지 않게 한다.
+                self.turn_intent = None
+                self.commit_triggered = False
+                self._left_streak = 0
+                self._right_streak = 0
+                self._sign_max_prox = 0.0
+                self._sign_absent_streak = 0
+                self._sign_seen_since_latch = 0
+                self.fork_cooldown_remaining = p['fork_cooldown_frames']
         else:
             target = trim + lane_effort
+            if self.fork_cooldown_remaining > 0:
+                self.fork_cooldown_remaining -= 1
 
         # 트림 기준 대칭 한계로 클램프(과조향 제거). trim=0 이면 [-1,1] 와 동일.
         target = _clamp(target, self._steer_lo, self._steer_hi)
@@ -692,5 +730,4 @@ class DrivingPolicy:
             'sign_seen': self._sign_seen_since_latch,
             'corner_hold': round(self.corner_hold, 3),
             'start_kick_remaining': self.start_kick_remaining,
-            'red_gone': self._red_gone_streak,
         }

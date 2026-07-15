@@ -70,7 +70,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'cruise_throttle',
-            default_value='0.18',
+            default_value='0.17',
             description='직진 순항 throttle. 조향만 점검하려면 0.0 으로 주면 바퀴가 안 돈다.',
         ),
         DeclareLaunchArgument(
@@ -229,11 +229,16 @@ def generate_launch_description():
                     # 출발 전 초록불에만 적용, 그 외/출발 후엔 conf_threshold(0.25).
                     'green_start_conf': 0.12,
                     # 출발 초록불 HSV 색 폴백(YOLO 보완). 출발 전에만 활성.
+                    # bag(signal_pos_20260715_164400) 실측 초록 LED: H 35~100(med 91,
+                    # 시안-그린), S 30~253(med 68·낮음), V 60~255. 기존 [40,80,80]~
+                    # [90,255,255]는 H상한 90·S하한 80 때문에 실제 초록의 5%만 잡았다.
+                    # H상한 105·S하한 40·V하한 80 으로 넓혀 초록 LED 를 확실히 잡되
+                    # 배경 유색 오검출은 억제(S/V 하한으로 흐릿·저채도 제외).
                     'green_hsv_fallback': True,
-                    'green_hsv_lower': [40, 80, 80],   # OpenCV H 0~180
-                    'green_hsv_upper': [90, 255, 255],
+                    'green_hsv_lower': [40, 40, 80],   # OpenCV H 0~180
+                    'green_hsv_upper': [105, 255, 255],
                     'green_roi_top_ratio': 0.0,        # 상단 ROI(바닥 배제)
-                    'green_roi_bottom_ratio': 0.7,     # 신호등 인식 상단 70% 제한과 일치
+                    'green_roi_bottom_ratio': 0.7,     # 실측: 신호등 cy 0.16~0.50 → 상단 70% 밴드
                     'green_min_area': 8.0,             # blob 최소 면적(px²)
                     'green_blob_score': 0.5,
                     'confirm_frames': 2,        # 좌/우 표지판 분기 (margin 게이팅이 보호)
@@ -241,28 +246,23 @@ def generate_launch_description():
                     # 잘못 래치된 방향을 교정). 초기 confirm_frames 보다 엄격하게.
                     'sign_revise_frames': 3,
                     'stop_confirm_frames': 2,   # 빨간불 정지
-                    # 빨강 소멸 출발(대안 트리거): 대기 빨강이 확정 정지된 뒤 빨강이
-                    # 이 프레임(YOLO rate) 연속 사라지면 초록 점등으로 보고 출발.
-                    # 초록 검출이 약해도 강한 빨강의 소멸로 출발(초록 확정과 병행).
-                    # 오출발하면 키우고(반응 느려짐), 출발이 느리면 줄인다.
-                    'start_on_red_gone': True,
-                    'red_gone_frames': 5,
-                    # 신호등(빨강/초록) 공통 ROI: 박스 세로중심이 프레임 상단 이 비율
-                    # 안일 때만 유효(신호등은 트랙 위쪽). 상단 70% 제한.
-                    'light_roi_top_ratio': 0.7,
+                    # 신호등(빨강/초록) 공통 세로 ROI: 박스 세로중심이 프레임 상단 이
+                    # 비율 안일 때만 유효. bag(signal_pos_20260715_164400) 실측: 신호등은
+                    # cy 0.16(빨강 LED)~0.50(초록 LED) 상단~중앙에 잡힘. 마진 포함 상단
+                    # 70% 로 제한 → 하단 30%(신호등 없음·빨간 바닥 오검출) 배제.
+                    'light_roi_top_ratio': 0.70,
                     # 신호등 가로 ROI: 현장 신호등이 화면 좌상단에 보이므로 박스 가로
                     # 중심이 프레임 폭의 왼쪽 60% 안일 때만 유효 → 오른쪽·중앙의
                     # 오검출(빨간 바닥 등) 배제. 빨강/초록 YOLO + 초록 HSV 폴백 공통.
                     # ⚠️ 도착 빨간불도 이 가로 ROI 를 통과해야 인식됨 — 도착 신호등이
                     # 좌상단이 아니면 x_max 를 키울 것(놓치면 B.6 +30s).
-                    'light_roi_x_min': 0.0,
-                    'light_roi_x_max': 0.6,
-                    # 빨간불 오검출(ArUco 구간 '빨간 바닥') 배제 — 기하 게이팅.
-                    # 실제 신호등은 프레임 상단에 작게, 빨간 바닥은 하단에 크게
-                    # 잡힌다. 박스 세로중심이 프레임의 이 비율보다 아래면(바닥) 무시.
-                    # 카메라 각도에 따라 조정: 신호등이 하단에 잡히면 키우고,
-                    # 바닥이 계속 오검출되면 줄인다. /inference/detections 의 box 로 튜닝.
-                    'redlight_max_y_ratio': 0.6,
+                    # 실측 가로: 신호등 cx 0.22~0.62(좌측~중앙). 마진 포함 0.15~0.72.
+                    'light_roi_x_min': 0.15,
+                    'light_roi_x_max': 0.72,
+                    # 빨간불 세로 위치 게이팅. 실측 빨강 LED 는 cy 0.16~0.30(상단)에
+                    # 강하게 잡힘 → 0.55 로 두면 실제 빨강은 통과하고 하단의 '빨간 바닥'
+                    # (ArUco 구간) 오검출을 배제한다. 도착 빨강이 더 아래에 잡히면 키운다.
+                    'redlight_max_y_ratio': 0.55,
                     # 박스 높이가 프레임의 이 비율 이상이면(너무 큼=바닥) 무시.
                     'redlight_max_h_ratio': 0.5,
                     # 출발 게이트/순항 — 런타임 인자로 노출(라인 트래킹 점검용).
@@ -276,7 +276,7 @@ def generate_launch_description():
                     # --- throttle (트랙 현장 조정 대상) ---
                     'cruise_throttle': ParameterValue(
                         cruise_throttle, value_type=float),  # 직진 순항 (기본 0.18)
-                    'corner_throttle': 0.17,  # 코너 감속 throttle(순항 0.18보다 낮춰 언더스티어 완화)
+                    'corner_throttle': 0.16,  # 코너 감속 throttle(순항 0.17보다 낮춰 커브 이탈·오버스티어 완화)
                     # 코너 판정 곡률 임계(정규화 [-1,1] 스케일). 실측 직선 curvature
                     # 노이즈가 ~0.04 이므로 0.30 은 사실상 발동 안 됨 → 0.12 로 낮춰
                     # 실제 커브에서 감속되게 함. ctrl 로그의 curv/corner_hold 로 튜닝.
@@ -286,11 +286,11 @@ def generate_launch_description():
                     'turn_throttle': 0.18,     # 갈림길 커밋 중 감속
                     # 조향 중(바퀴 꺾는 중) throttle: |steer-trim| 이 임계 이상이면
                     # 실제 조향각에 반응해 감속(곡률 기반 corner_throttle 과 별개).
-                    'steer_throttle': 0.17,   # 조향 중 감속(순항 0.18보다 낮춰 언더스티어 완화)
+                    'steer_throttle': 0.16,   # 조향 중 감속(커브 정점 속도 — 순항 0.17보다 낮춰 오버스티어·이탈 완화)
                     'steer_throttle_threshold': 0.05,
                     # --- 조향 (트랙 현장 조정 대상) ---
                     'steer_sign': -1.0,        # 전체 조향 극성(벤치서 반대면 뒤집기)
-                    'steer_kp': 0.4,           # 차선 오프셋 비례 게인(지그재그 억제 위해 하향)
+                    'steer_kp': 0.6,           # 차선 오프셋 비례 게인(조향 각 확대 — 언더/오버스티어 완화)
                     'steer_kd': 0.5,           # 미분 게인(코너 오버스티어/과조향 진동 감쇠 강화)
                     # 조향 데드밴드: |offset|<이 값이면 비례항 0. 직선에서 중앙 근처
                     # offset 노이즈로 좌우로 떠는(지그재그/hunting) 것을 막는다.
@@ -299,8 +299,15 @@ def generate_launch_description():
                     # 곡률 피드포워드: 다가오는 커브를 미리 조향(이탈 방지). 직선
                     # curvature 노이즈(~0.04)엔 무영향, 실커브에서만 유효. 실차서
                     # ctrl 로그의 curv 대비 커브 진입 조기성이 부족하면 키운다.
-                    'curve_ff': 0.35,
-                    'steer_slew': 0.15,        # 프레임당 최대 조향 변화
+                    'curve_ff': 0.45,
+                    'steer_slew': 0.25,        # 프레임당 최대 조향 변화(큰 각 빠른 도달 — 언더스티어 지연 완화)
+                    # 조향 응답 곡선(비선형 게인) — 언더/오버스티어 보정. 차선 PD
+                    # 피드백 크기 |pd| 에 따라 게인을 center(작은 조향 증폭)→edge(큰
+                    # 조향 감쇠)로 보간한다. 실차 튜닝: 여전히 작게 꺾이면 center↑,
+                    # 여전히 과조향이면 edge↓. 둘 다 1.0 이면 선형(무동작).
+                    'steer_gain_center': 1.4,  # |pd|→0 게인(>1: 언더스티어 완화)
+                    'steer_gain_edge': 0.7,    # |pd|≥ref 게인(<1: 오버스티어 완화)
+                    'steer_gain_ref': 0.45,    # 게인이 edge 로 포화되는 |pd| 기준
                     # --- 갈림길 (트랙 현장 조정 대상) ---
                     'turn_bias': 0.7,          # 커밋 중 방향 바이어스 크기(강하게 꺾음)
                     'commit_lane_weight': 0.3,  # 커밋 중 차선 PD 비중(0=차선무시,1=평소)

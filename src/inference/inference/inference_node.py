@@ -83,9 +83,6 @@ class InferenceNode(Node):
         self.declare_parameter('stop_confirm_frames', dp['stop_confirm_frames'])
         self.declare_parameter('require_green_start', dp['require_green_start'])
         self.declare_parameter('green_resumes_from_red', dp['green_resumes_from_red'])
-        # 빨강 소멸 출발(대안 트리거) — 대기 빨강이 사라지면 초록으로 보고 출발.
-        self.declare_parameter('start_on_red_gone', dp['start_on_red_gone'])
-        self.declare_parameter('red_gone_frames', dp['red_gone_frames'])
         self.declare_parameter('light_roi_top_ratio', dp['light_roi_top_ratio'])
         # 신호등 가로 ROI(좌/우 특정 영역만 인정 — 반대쪽 오검출 배제). 0~1=전체 폭.
         self.declare_parameter('light_roi_x_min', dp['light_roi_x_min'])
@@ -122,10 +119,15 @@ class InferenceNode(Node):
         self.declare_parameter('steer_deadband', dp['steer_deadband'])
         self.declare_parameter('curve_ff', dp['curve_ff'])
         self.declare_parameter('steer_slew', dp['steer_slew'])
+        # 조향 응답 곡선(비선형 게인) — 언더/오버스티어 보정.
+        self.declare_parameter('steer_gain_center', dp['steer_gain_center'])
+        self.declare_parameter('steer_gain_edge', dp['steer_gain_edge'])
+        self.declare_parameter('steer_gain_ref', dp['steer_gain_ref'])
         self.declare_parameter('turn_bias', dp['turn_bias'])
         self.declare_parameter('commit_lane_weight', dp['commit_lane_weight'])
         self.declare_parameter('commit_steer_slew', dp['commit_steer_slew'])
         self.declare_parameter('fork_commit_frames', dp['fork_commit_frames'])
+        self.declare_parameter('fork_cooldown_frames', dp['fork_cooldown_frames'])
         self.declare_parameter('sign_margin', dp['sign_margin'])
         self.declare_parameter('sign_conf', dp['sign_conf'])
         self.declare_parameter('sign_revise_frames', dp['sign_revise_frames'])
@@ -205,8 +207,6 @@ class InferenceNode(Node):
             'require_green_start': bool(self.get_parameter('require_green_start').value),
             'green_resumes_from_red': bool(
                 self.get_parameter('green_resumes_from_red').value),
-            'start_on_red_gone': bool(self.get_parameter('start_on_red_gone').value),
-            'red_gone_frames': int(self.get_parameter('red_gone_frames').value),
             'light_roi_top_ratio': float(
                 self.get_parameter('light_roi_top_ratio').value),
             'light_roi_x_min': float(self.get_parameter('light_roi_x_min').value),
@@ -234,10 +234,14 @@ class InferenceNode(Node):
             'steer_deadband': float(self.get_parameter('steer_deadband').value),
             'curve_ff': float(self.get_parameter('curve_ff').value),
             'steer_slew': float(self.get_parameter('steer_slew').value),
+            'steer_gain_center': float(self.get_parameter('steer_gain_center').value),
+            'steer_gain_edge': float(self.get_parameter('steer_gain_edge').value),
+            'steer_gain_ref': float(self.get_parameter('steer_gain_ref').value),
             'turn_bias': float(self.get_parameter('turn_bias').value),
             'commit_lane_weight': float(self.get_parameter('commit_lane_weight').value),
             'commit_steer_slew': float(self.get_parameter('commit_steer_slew').value),
             'fork_commit_frames': int(self.get_parameter('fork_commit_frames').value),
+            'fork_cooldown_frames': int(self.get_parameter('fork_cooldown_frames').value),
             'sign_margin': float(self.get_parameter('sign_margin').value),
             'sign_conf': float(self.get_parameter('sign_conf').value),
             'sign_revise_frames': int(
@@ -537,7 +541,6 @@ class InferenceNode(Node):
                 f'fork_remaining={st["fork_remaining"]} '
                 f'kick={st["start_kick_remaining"]} '
                 f'green={st["green_started"]} red={st["red_stopped"]} '
-                f'red_gone={st["red_gone"]} '
                 f'aruco_stop={aruco_blocked}')
 
 

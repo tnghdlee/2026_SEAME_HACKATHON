@@ -300,6 +300,9 @@ def compute_lane_offset(
     min_lane_px=200,
     lane_width_ratio=0.55,
     min_sep_ratio=0.30,
+    # 한쪽 라인으로 인정할 최소 세로 폭(수집 픽셀 y 범위 / BEV 높이). 가로선은
+    # 조감도에서 세로로 짧으므로 이 값 미만이면 차선으로 인정하지 않는다(가로선 배제).
+    min_y_span_ratio=0.40,
     # BEV 가로선(정지선·격자·체커보드) 제거 — 행 밀도 임계(폭 비율) + 밴드 팽창(±px).
     # opencv_node 의 lane_horiz_filter_frac/pad 에 대응. frac<=0 이면 비활성.
     horiz_filter_frac=0.5,
@@ -371,20 +374,31 @@ def compute_lane_offset(
     right_inds = sliding_window_search(binary_bev, rightx_base, nonzero_x, nonzero_y,
                                        n_windows, margin, minpix, overlay, (0, 128, 255))
 
-    # 5) 2차 함수 적합
-    left_fit = right_fit = None
-    if len(left_inds) >= min_lane_px:
-        left_fit = np.polyfit(nonzero_y[left_inds], nonzero_x[left_inds], 2)
-    if len(right_inds) >= min_lane_px:
-        right_fit = np.polyfit(nonzero_y[right_inds], nonzero_x[right_inds], 2)
-
-    left_detected = left_fit is not None
-    right_detected = right_fit is not None
-
+    # 5) 2차 함수 적합 — 픽셀 수 + 세로 폭(y-span) 검증.
+    # 가로선(정지선·격자·차선 밖 배경의 가로 특징)은 조감도에서 세로로 짧다.
+    # 슬라이딩 윈도우가 가로선 위에 잠기면 x=f(y) 적합이 병적으로 휘어 lane 중앙이
+    # BEV 가장자리로 튀고, offset 이 극단(±1)이 되어 차가 90도로 꺾여 바깥으로
+    # 이탈한다(사용자 보고 증상). 실제 차선은 조감도 세로를 길게 가로지르므로,
+    # 수집 픽셀의 y 범위가 BEV 높이의 min_y_span_ratio 이상일 때만 유효 차선으로
+    # 인정한다 → 세로로 짧은 가로선/노이즈를 근본 배제.
     bev_h, bev_w = binary_bev.shape[:2]
     y_near = bev_h - 1
     y_far = 0
     img_half = bev_w / 2.0
+    min_yspan = min_y_span_ratio * bev_h
+
+    def _fit_side(inds):
+        if len(inds) < min_lane_px:
+            return None
+        ys = nonzero_y[inds]
+        if float(ys.max() - ys.min()) < min_yspan:
+            return None                # 세로로 짧음 → 가로선/노이즈, 차선 아님
+        return np.polyfit(ys, nonzero_x[inds], 2)
+
+    left_fit = _fit_side(left_inds)
+    right_fit = _fit_side(right_inds)
+    left_detected = left_fit is not None
+    right_detected = right_fit is not None
 
     # 허위 양쪽 검출 배제: 둘 다 적합됐어도 near 간격이 너무 좁으면(혹은 교차하면)
     # 두 슬라이딩 윈도우가 같은 물리 라인에 겹쳐 잠긴 것 → 픽셀 많은 쪽만 남긴다.
